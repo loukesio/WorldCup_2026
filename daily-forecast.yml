@@ -1,0 +1,57 @@
+# .github/workflows/daily-forecast.yml
+# Runs once a day: pull the latest World Cup results, re-run the Monte Carlo,
+# and commit the refreshed forecast. The commit triggers a GitHub Pages
+# redeploy, so the published site shows the new numbers automatically.
+
+name: Daily forecast
+
+on:
+  schedule:
+    # World Cup 2026 runs 11 Jun - 19 Jul. Cron has no year field, so we use
+    # date ranges. Runs daily at 08:00 UTC, only during the tournament.
+    - cron: "0 8 11-30 6 *"     # 11-30 June
+    - cron: "0 8 1-19 7 *"      # 1-19 July (through the final)
+  workflow_dispatch: {}         # plus a manual "Run workflow" button anytime
+
+permissions:
+  contents: write               # allow the bot to commit the updated forecast
+
+concurrency:                    # never let two daily runs overlap
+  group: daily-forecast
+  cancel-in-progress: false
+
+jobs:
+  forecast:
+    runs-on: ubuntu-latest
+    env:
+      N_SIMS: "20000"           # CI has time; bump for crisper probabilities
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up R
+        uses: r-lib/actions/setup-r@v2
+        with:
+          r-version: release
+          # forecast.R / fetch_results.R are base-R only — no packages to install
+
+      - name: Pull latest international results
+        run: curl -fsSL "https://raw.githubusercontent.com/martj42/international_results/master/results.csv" -o /tmp/all.csv
+
+      - name: Extract 2026 World Cup results
+        run: Rscript fetch_results.R       # writes data/results.csv
+
+      - name: Run Monte Carlo forecast
+        run: Rscript forecast.R            # writes data/forecast.json + FORECAST.md
+
+      - name: Commit updated forecast
+        run: |
+          git config user.name  "forecast-bot"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add data/results.csv data/forecast.json FORECAST.md
+          if git diff --staged --quiet; then
+            echo "No change in forecast — nothing to commit."
+          else
+            git commit -m "Daily forecast — $(date -u +'%Y-%m-%d %H:%M UTC')"
+            git push
+          fi

@@ -1,0 +1,1193 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>Mundial '26 — Forecast Lab</title>
+<meta name="description" content="World Cup 2026 Monte-Carlo predictor (Elo + Poisson). Live-updating championship odds and team path heatmaps."/>
+<link rel="preconnect" href="https://fonts.googleapis.com"/>
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin/>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js" crossorigin></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js" crossorigin></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.5/babel.min.js" crossorigin></script>
+<style>html,body{margin:0;padding:0;background:#FBF6F4;}</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel" data-presets="react">
+const { useState, useEffect, useRef, useMemo, useCallback } = React;
+
+/* =========================================================================
+   MUNDIAL '26 — FORECAST LAB
+   Engine:  World Football Elo  →  Elo-driven Poisson goals  →  Monte Carlo
+   Same family as the EuroLeague pipeline: one match is an Elo-weighted
+   coin flip; run the whole bracket thousands of times and read the
+   frequencies. Live-updating: lock a real result and the forecast moves
+   (the played match is fixed in every sim + Elo is nudged for the rest).
+   Data: 2026 field, all 12 groups & fixtures, R32 template (FIFA),
+   Elo as of ~6 Jun 2026 (eloratings / footballratings).
+   ========================================================================= */
+
+/* ----------------------------- PALETTE -------------------------------- */
+const C = {
+  bg: "#FBF6F4",
+  bg2: "#F4EAEA",
+  surface: "#FFFFFF",
+  ink: "#2A2438",
+  inkSoft: "#7A7287",
+  line: "#EBDDE2",
+  pink: "#E5396E",
+  pinkDeep: "#B11E5A",
+  pinkSoft: "#FBE0EA",
+  turq: "#11B5C4",
+  turqDeep: "#0A7E89",
+  turqSoft: "#D8F4F6",
+  gold: "#E8A33D",
+};
+
+/* ----------------------------- TEAMS ---------------------------------- */
+// elo as of ~Jun 2026 (top values from eloratings/footballratings; rest estimated)
+const TEAMS = {
+  // Group A
+  Mexico:{g:"A",elo:1800,fl:"🇲🇽"}, "South Africa":{g:"A",elo:1640,fl:"🇿🇦"},
+  "Korea Republic":{g:"A",elo:1755,fl:"🇰🇷"}, Czechia:{g:"A",elo:1790,fl:"🇨🇿"},
+  // Group B
+  Canada:{g:"B",elo:1735,fl:"🇨🇦"}, "Bosnia and Herzegovina":{g:"B",elo:1705,fl:"🇧🇦"},
+  Qatar:{g:"B",elo:1680,fl:"🇶🇦"}, Switzerland:{g:"B",elo:1897,fl:"🇨🇭"},
+  // Group C
+  Brazil:{g:"C",elo:1988,fl:"🇧🇷"}, Morocco:{g:"C",elo:1860,fl:"🇲🇦"},
+  Haiti:{g:"C",elo:1530,fl:"🇭🇹"}, Scotland:{g:"C",elo:1775,fl:"🏴󠁧󠁢󠁳󠁣󠁴󠁿"},
+  // Group D
+  "United States":{g:"D",elo:1795,fl:"🇺🇸"}, Paraguay:{g:"D",elo:1760,fl:"🇵🇾"},
+  Australia:{g:"D",elo:1715,fl:"🇦🇺"}, "Türkiye":{g:"D",elo:1880,fl:"🇹🇷"},
+  // Group E
+  Germany:{g:"E",elo:1910,fl:"🇩🇪"}, "Curaçao":{g:"E",elo:1535,fl:"🇨🇼"},
+  "Ivory Coast":{g:"E",elo:1810,fl:"🇨🇮"}, Ecuador:{g:"E",elo:1933,fl:"🇪🇨"},
+  // Group F
+  Netherlands:{g:"F",elo:1959,fl:"🇳🇱"}, Japan:{g:"F",elo:1879,fl:"🇯🇵"},
+  Sweden:{g:"F",elo:1775,fl:"🇸🇪"}, Tunisia:{g:"F",elo:1690,fl:"🇹🇳"},
+  // Group G
+  Belgium:{g:"G",elo:1849,fl:"🇧🇪"}, Egypt:{g:"G",elo:1700,fl:"🇪🇬"},
+  Iran:{g:"G",elo:1785,fl:"🇮🇷"}, "New Zealand":{g:"G",elo:1500,fl:"🇳🇿"},
+  // Group H
+  Spain:{g:"H",elo:2155,fl:"🇪🇸"}, "Cape Verde":{g:"H",elo:1620,fl:"🇨🇻"},
+  "Saudi Arabia":{g:"H",elo:1640,fl:"🇸🇦"}, Uruguay:{g:"H",elo:1890,fl:"🇺🇾"},
+  // Group I
+  France:{g:"I",elo:2062,fl:"🇫🇷"}, Senegal:{g:"I",elo:1869,fl:"🇸🇳"},
+  Iraq:{g:"I",elo:1620,fl:"🇮🇶"}, Norway:{g:"I",elo:1922,fl:"🇳🇴"},
+  // Group J
+  Argentina:{g:"J",elo:2113,fl:"🇦🇷"}, Algeria:{g:"J",elo:1745,fl:"🇩🇿"},
+  Austria:{g:"J",elo:1790,fl:"🇦🇹"}, Jordan:{g:"J",elo:1620,fl:"🇯🇴"},
+  // Group K
+  Portugal:{g:"K",elo:1984,fl:"🇵🇹"}, "DR Congo":{g:"K",elo:1720,fl:"🇨🇩"},
+  Uzbekistan:{g:"K",elo:1690,fl:"🇺🇿"}, Colombia:{g:"K",elo:1977,fl:"🇨🇴"},
+  // Group L
+  England:{g:"L",elo:2020,fl:"🏴󠁧󠁢󠁥󠁮󠁧󠁿"}, Croatia:{g:"L",elo:1933,fl:"🇭🇷"},
+  Ghana:{g:"L",elo:1700,fl:"🇬🇭"}, Panama:{g:"L",elo:1675,fl:"🇵🇦"},
+};
+const TEAM_NAMES = Object.keys(TEAMS);
+const HOSTS = new Set(["Mexico", "Canada", "United States"]);
+const GROUP_LETTERS = ["A","B","C","D","E","F","G","H","I","J","K","L"];
+
+/* --------------------------- GROUP FIXTURES --------------------------- */
+// [home, away, date]   (order/date used for the Match Center timeline)
+const FIXTURES = [
+  // A
+  ["Mexico","South Africa","Jun 11","A"],["Korea Republic","Czechia","Jun 11","A"],
+  ["Czechia","South Africa","Jun 18","A"],["Mexico","Korea Republic","Jun 18","A"],
+  ["Czechia","Mexico","Jun 24","A"],["South Africa","Korea Republic","Jun 24","A"],
+  // B
+  ["Canada","Bosnia and Herzegovina","Jun 12","B"],["Qatar","Switzerland","Jun 13","B"],
+  ["Switzerland","Bosnia and Herzegovina","Jun 18","B"],["Canada","Qatar","Jun 18","B"],
+  ["Switzerland","Canada","Jun 24","B"],["Bosnia and Herzegovina","Qatar","Jun 24","B"],
+  // C
+  ["Brazil","Morocco","Jun 13","C"],["Haiti","Scotland","Jun 13","C"],
+  ["Scotland","Morocco","Jun 19","C"],["Brazil","Haiti","Jun 19","C"],
+  ["Scotland","Brazil","Jun 24","C"],["Morocco","Haiti","Jun 24","C"],
+  // D
+  ["United States","Paraguay","Jun 12","D"],["Australia","Türkiye","Jun 13","D"],
+  ["United States","Australia","Jun 19","D"],["Türkiye","Paraguay","Jun 19","D"],
+  ["Türkiye","United States","Jun 25","D"],["Paraguay","Australia","Jun 25","D"],
+  // E
+  ["Germany","Curaçao","Jun 14","E"],["Ivory Coast","Ecuador","Jun 14","E"],
+  ["Germany","Ivory Coast","Jun 20","E"],["Ecuador","Curaçao","Jun 20","E"],
+  ["Curaçao","Ivory Coast","Jun 25","E"],["Ecuador","Germany","Jun 25","E"],
+  // F
+  ["Netherlands","Japan","Jun 14","F"],["Sweden","Tunisia","Jun 14","F"],
+  ["Netherlands","Sweden","Jun 20","F"],["Tunisia","Japan","Jun 20","F"],
+  ["Japan","Sweden","Jun 25","F"],["Tunisia","Netherlands","Jun 25","F"],
+  // G
+  ["Belgium","Egypt","Jun 15","G"],["Iran","New Zealand","Jun 15","G"],
+  ["Belgium","Iran","Jun 21","G"],["New Zealand","Egypt","Jun 21","G"],
+  ["Egypt","Iran","Jun 26","G"],["New Zealand","Belgium","Jun 26","G"],
+  // H
+  ["Spain","Cape Verde","Jun 15","H"],["Saudi Arabia","Uruguay","Jun 15","H"],
+  ["Spain","Saudi Arabia","Jun 21","H"],["Uruguay","Cape Verde","Jun 21","H"],
+  ["Cape Verde","Saudi Arabia","Jun 26","H"],["Uruguay","Spain","Jun 26","H"],
+  // I
+  ["France","Senegal","Jun 16","I"],["Iraq","Norway","Jun 16","I"],
+  ["France","Iraq","Jun 22","I"],["Norway","Senegal","Jun 22","I"],
+  ["Norway","France","Jun 26","I"],["Senegal","Iraq","Jun 26","I"],
+  // J
+  ["Argentina","Algeria","Jun 16","J"],["Austria","Jordan","Jun 16","J"],
+  ["Argentina","Austria","Jun 22","J"],["Jordan","Algeria","Jun 22","J"],
+  ["Jordan","Argentina","Jun 27","J"],["Algeria","Austria","Jun 27","J"],
+  // K
+  ["Portugal","DR Congo","Jun 17","K"],["Uzbekistan","Colombia","Jun 17","K"],
+  ["Portugal","Uzbekistan","Jun 23","K"],["Colombia","DR Congo","Jun 23","K"],
+  ["Colombia","Portugal","Jun 27","K"],["DR Congo","Uzbekistan","Jun 27","K"],
+  // L
+  ["England","Croatia","Jun 17","L"],["Ghana","Panama","Jun 17","L"],
+  ["England","Ghana","Jun 23","L"],["Panama","Croatia","Jun 23","L"],
+  ["Panama","England","Jun 27","L"],["Croatia","Ghana","Jun 27","L"],
+].map((f, i) => ({ id: i, home: f[0], away: f[1], date: f[2], g: f[3] }));
+
+const DATE_ORDER = ["Jun 11","Jun 12","Jun 13","Jun 14","Jun 15","Jun 16","Jun 17","Jun 18",
+  "Jun 19","Jun 20","Jun 21","Jun 22","Jun 23","Jun 24","Jun 25","Jun 26","Jun 27"];
+
+/* ------------------------- KNOCKOUT TEMPLATE -------------------------- */
+// R32 (FIFA bracket template). T = best-third slot (eligible groups noted).
+const R32 = [
+  { a:{t:"R",g:"A"}, b:{t:"R",g:"B"} },                       // 0
+  { a:{t:"W",g:"C"}, b:{t:"R",g:"F"} },                       // 1
+  { a:{t:"W",g:"E"}, b:{t:"T"} },                             // 2  T:[A,B,C,D,F]
+  { a:{t:"W",g:"F"}, b:{t:"R",g:"C"} },                       // 3
+  { a:{t:"R",g:"E"}, b:{t:"R",g:"I"} },                       // 4
+  { a:{t:"W",g:"I"}, b:{t:"T"} },                             // 5  T:[C,D,F,G,H]
+  { a:{t:"W",g:"A"}, b:{t:"T"} },                             // 6  T:[C,E,F,H,I]
+  { a:{t:"W",g:"L"}, b:{t:"T"} },                             // 7  T:[E,H,I,J,K]
+  { a:{t:"W",g:"G"}, b:{t:"T"} },                             // 8  T:[A,E,H,I,J]
+  { a:{t:"W",g:"D"}, b:{t:"T"} },                             // 9  T:[B,E,F,I,J]
+  { a:{t:"W",g:"H"}, b:{t:"R",g:"J"} },                       // 10
+  { a:{t:"R",g:"K"}, b:{t:"R",g:"L"} },                       // 11
+  { a:{t:"W",g:"B"}, b:{t:"T"} },                             // 12 T:[E,F,G,I,J]
+  { a:{t:"R",g:"D"}, b:{t:"R",g:"G"} },                       // 13
+  { a:{t:"W",g:"J"}, b:{t:"R",g:"H"} },                       // 14
+  { a:{t:"W",g:"K"}, b:{t:"T"} },                             // 15 T:[D,E,I,J,L]
+];
+const THIRD_SLOTS = [
+  { idx:2,  el:new Set("A,B,C,D,F".split(",")) },
+  { idx:5,  el:new Set("C,D,F,G,H".split(",")) },
+  { idx:6,  el:new Set("C,E,F,H,I".split(",")) },
+  { idx:7,  el:new Set("E,H,I,J,K".split(",")) },
+  { idx:8,  el:new Set("A,E,H,I,J".split(",")) },
+  { idx:9,  el:new Set("B,E,F,I,J".split(",")) },
+  { idx:12, el:new Set("E,F,G,I,J".split(",")) },
+  { idx:15, el:new Set("D,E,I,J,L".split(",")) },
+];
+// Custom bracket tree (top seeds spread across quarters, honouring the
+// "top-4 separated until the semis" design). Indices reference prior round.
+const R16_PAIRS = [[10,0],[3,9],[5,4],[1,6],[14,13],[2,11],[7,12],[8,15]];
+const QF_PAIRS  = [[0,1],[2,3],[4,5],[6,7]];
+const SF_PAIRS  = [[0,1],[2,3]];
+
+/* ----------------------------- ENGINE --------------------------------- */
+function poisson(l){ const L=Math.exp(-l); let k=0,p=1; do{k++;p*=Math.random();}while(p>L); return k-1; }
+
+function lambdas(eloA, eloB, hostA, hostB, ko){
+  const bump = ko ? 30 : 55;
+  let Rd = eloA - eloB + (hostA?bump:0) - (hostB?bump:0);
+  const sup = Rd / 250;
+  const lamA = Math.max(0.18, 1.38 + sup/2);
+  const lamB = Math.max(0.18, 1.38 - sup/2);
+  return [lamA, lamB, Rd];
+}
+// returns {ga,gb,win:'A'|'B'|'D'}
+function simMatch(a, b, elo, ko){
+  const [lamA, lamB, Rd] = lambdas(elo[a], elo[b], HOSTS.has(a), HOSTS.has(b), ko);
+  let ga = poisson(lamA), gb = poisson(lamB);
+  if (ga === gb && ko){
+    const pA = 1/(1+Math.pow(10, -Rd/400));
+    return { ga, gb, win: Math.random() < pA ? "A" : "B" };
+  }
+  return { ga, gb, win: ga>gb ? "A" : gb>ga ? "B" : "D" };
+}
+// analytic W/D/L for schedule display
+function wdl(a, b){
+  const [lamA, lamB] = lambdas(TEAMS[a].elo, TEAMS[b].elo, HOSTS.has(a), HOSTS.has(b), false);
+  const pmf = (l,k)=>Math.exp(-l)*Math.pow(l,k)/factorial(k);
+  let w=0,d=0,los=0;
+  for(let i=0;i<=9;i++) for(let j=0;j<=9;j++){
+    const p = pmf(lamA,i)*pmf(lamB,j);
+    if(i>j) w+=p; else if(i===j) d+=p; else los+=p;
+  }
+  const s=w+d+los; return { w:w/s, d:d/s, l:los/s };
+}
+const _fact=[1]; function factorial(n){ if(_fact[n]!=null)return _fact[n]; let r=_fact[_fact.length-1],i=_fact.length; for(;i<=n;i++){r*=i;_fact[i]=r;} return _fact[n]; }
+
+// Elo update from locked results (sequential, chronological)
+function buildCurrentElo(locked){
+  const elo = {}; TEAM_NAMES.forEach(t=>elo[t]=TEAMS[t].elo);
+  const entries = Object.entries(locked).map(([id,v])=>({ ...FIXTURES[+id], ...v }));
+  entries.sort((x,y)=>DATE_ORDER.indexOf(x.date)-DATE_ORDER.indexOf(y.date));
+  for(const m of entries){
+    const Rd = elo[m.home]-elo[m.away];
+    const E = 1/(1+Math.pow(10,-Rd/400));
+    const S = m.ga>m.gb?1:m.ga<m.gb?0:0.5;
+    const gd = Math.abs(m.ga-m.gb);
+    const gMul = gd<=1?1 : gd===2?1.5 : (11+gd)/8;
+    const K = 40;
+    const delta = K*gMul*(S-E);
+    elo[m.home]+=delta; elo[m.away]-=delta;
+  }
+  return elo;
+}
+
+// perfect matching of best thirds → third slots (backtracking)
+function assignThirds(groups){
+  const used = new Array(THIRD_SLOTS.length).fill(false);
+  const out = {};
+  const bt = (i)=>{
+    if(i>=groups.length) return true;
+    const g = groups[i];
+    for(let s=0;s<THIRD_SLOTS.length;s++){
+      if(!used[s] && THIRD_SLOTS[s].el.has(g)){
+        used[s]=true; out[THIRD_SLOTS[s].idx]=g;
+        if(bt(i+1)) return true;
+        used[s]=false; delete out[THIRD_SLOTS[s].idx];
+      }
+    }
+    return false;
+  };
+  if(bt(0)) return out;
+  // fallback (rare)
+  const u=new Array(THIRD_SLOTS.length).fill(false), fb={};
+  groups.forEach(g=>{ let done=false;
+    for(let s=0;s<THIRD_SLOTS.length;s++){ if(!u[s]&&THIRD_SLOTS[s].el.has(g)){u[s]=true;fb[THIRD_SLOTS[s].idx]=g;done=true;break;} }
+    if(!done) for(let s=0;s<THIRD_SLOTS.length;s++){ if(!u[s]){u[s]=true;fb[THIRD_SLOTS[s].idx]=g;break;} }
+  });
+  return fb;
+}
+
+// one full tournament
+function simTournament(elo, locked, acc){
+  // ----- group stage -----
+  const standings = {}; // group -> [{team,pts,gd,gf}]
+  GROUP_LETTERS.forEach(g=>{
+    standings[g] = TEAM_NAMES.filter(t=>TEAMS[t].g===g).map(t=>({team:t,pts:0,gd:0,gf:0}));
+  });
+  const idxOf = {}; GROUP_LETTERS.forEach(g=>{ standings[g].forEach((r,i)=>idxOf[r.team]=i); });
+  for(const f of FIXTURES){
+    let ga,gb;
+    if(locked[f.id]){ ga=locked[f.id].ga; gb=locked[f.id].gb; }
+    else { const r=simMatch(f.home,f.away,elo,false); ga=r.ga; gb=r.gb; }
+    const rows = standings[f.g];
+    const H=rows[idxOf[f.home]], A=rows[idxOf[f.away]];
+    H.gf+=ga; A.gf+=gb; H.gd+=ga-gb; A.gd+=gb-ga;
+    if(ga>gb) H.pts+=3; else if(gb>ga) A.pts+=3; else { H.pts++; A.pts++; }
+  }
+  const winners={}, runners={}, thirds={};
+  const thirdPool=[];
+  GROUP_LETTERS.forEach(g=>{
+    const r=[...standings[g]].sort((x,y)=> y.pts-x.pts || y.gd-x.gd || y.gf-x.gf || (Math.random()-0.5));
+    winners[g]=r[0].team; runners[g]=r[1].team; thirds[g]=r[2].team;
+    thirdPool.push({g, ...r[2]});
+  });
+  thirdPool.sort((x,y)=> y.pts-x.pts || y.gd-x.gd || y.gf-x.gf || (Math.random()-0.5));
+  const bestThirdGroups = thirdPool.slice(0,8).map(t=>t.g);
+  const thirdAssign = assignThirds(bestThirdGroups);
+
+  // ----- resolve R32 -----
+  const resolve = (spec, slotIdx)=>{
+    if(spec.t==="W") return winners[spec.g];
+    if(spec.t==="R") return runners[spec.g];
+    return thirds[thirdAssign[slotIdx]]; // T
+  };
+  const r32 = R32.map((m,i)=>({ a:resolve(m.a,i), b:resolve(m.b,i) }));
+
+  // count qualifiers (reached R32)
+  r32.forEach(m=>{ acc[m.a].r32++; acc[m.b].r32++; });
+  winners && GROUP_LETTERS.forEach(g=>{ acc[winners[g]].gw++; acc[runners[g]].gr++; });
+
+  // ----- knockout -----
+  const koWin = (x,y)=> simMatch(x,y,elo,true).win==="A" ? x : y;
+  const r16win = r32.map(m=>koWin(m.a,m.b));     // 16 winners
+  r16win.forEach(t=>acc[t].r16++);
+  const qfTeams = R16_PAIRS.map(([p,q])=>koWin(r16win[p], r16win[q])); // 8
+  qfTeams.forEach(t=>acc[t].qf++);
+  const sfTeams = QF_PAIRS.map(([p,q])=>koWin(qfTeams[p], qfTeams[q])); // 4
+  sfTeams.forEach(t=>acc[t].sf++);
+  const fnTeams = SF_PAIRS.map(([p,q])=>koWin(sfTeams[p], sfTeams[q])); // 2
+  fnTeams.forEach(t=>acc[t].fin++);
+  const champ = koWin(fnTeams[0], fnTeams[1]);
+  acc[champ].champ++;
+}
+
+/* ----------------------------- COLOURS -------------------------------- */
+function lerp(a,b,t){ return Math.round(a+(b-a)*t); }
+function pinkRamp(t){ // 0..1 -> css
+  t=Math.max(0,Math.min(1,t));
+  const stops=[[253,240,245],[247,176,201],[229,57,110],[148,18,72]];
+  const seg=t*3, i=Math.min(2,Math.floor(seg)), f=seg-i;
+  const a=stops[i], b=stops[i+1];
+  return `rgb(${lerp(a[0],b[0],f)},${lerp(a[1],b[1],f)},${lerp(a[2],b[2],f)})`;
+}
+const fmt = (p)=> p>=0.995?"100" : p<0.0005?"·" : p<0.01?(p*100).toFixed(1) : (p*100).toFixed(p<0.1?1:0);
+
+/* --------------------------- COACHES ---------------------------------- */
+// [surname (display), surname initial]  — 2026 head coaches (as of Jun 2026)
+const COACHES = {
+  Algeria:["Petković","P"], Argentina:["Scaloni","S"], Australia:["Popovic","P"], Austria:["Rangnick","R"],
+  Belgium:["Garcia","G"], "Bosnia and Herzegovina":["Barbarez","B"], Brazil:["Ancelotti","A"], Canada:["Marsch","M"],
+  "Cape Verde":["Bubista","B"], Colombia:["Lorenzo","L"], Croatia:["Dalić","D"], "Curaçao":["Advocaat","A"],
+  Czechia:["Koubek","K"], "DR Congo":["Desabre","D"], Ecuador:["Beccacece","B"], Egypt:["Hassan","H"],
+  England:["Tuchel","T"], France:["Deschamps","D"], Germany:["Nagelsmann","N"], Ghana:["Queiroz","Q"],
+  Haiti:["Migné","M"], Iran:["Ghalenoei","G"], Iraq:["Arnold","A"], "Ivory Coast":["Faé","F"],
+  Japan:["Moriyasu","M"], Jordan:["Sellami","S"], "Korea Republic":["Hong","H"], Mexico:["Aguirre","A"],
+  Morocco:["Ouahbi","O"], Netherlands:["Koeman","K"], "New Zealand":["Bazeley","B"], Norway:["Solbakken","S"],
+  Panama:["Christiansen","C"], Paraguay:["Alfaro","A"], Portugal:["Martínez","M"], Qatar:["Lopetegui","L"],
+  "Saudi Arabia":["Donis","D"], Scotland:["Clarke","C"], Senegal:["Thiaw","T"], "South Africa":["Broos","B"],
+  Spain:["de la Fuente","F"], Sweden:["Potter","P"], Switzerland:["Yakin","Y"],
+  "Türkiye":["Montella","M"], Uruguay:["Bielsa","B"], "United States":["Pochettino","P"], Uzbekistan:["Cannavaro","C"], Tunisia:["Lamouchi","L"],
+};
+// neutral win-share (P(win)+½P(draw)) from the same Elo→Poisson model, no host bump
+function neutralScore(eloA, eloB){
+  const sup=(eloA-eloB)/250;
+  const la=Math.max(.18,1.38+sup/2), lb=Math.max(.18,1.38-sup/2);
+  const pmf=(l,k)=>Math.exp(-l)*Math.pow(l,k)/factorial(k);
+  let w=0,d=0;
+  for(let i=0;i<=9;i++) for(let j=0;j<=9;j++){ const p=pmf(la,i)*pmf(lb,j); if(i>j)w+=p; else if(i===j)d+=p; }
+  return w + 0.5*d;
+}
+function diverge(t){ // 0..1 ; 0.5 neutral. turquoise(low) -> cream(mid) -> pink(high)
+  t=Math.max(0,Math.min(1,t));
+  const lo=[17,181,196], mid=[247,237,230], hi=[229,57,110];
+  let a,b,f;
+  if(t<0.5){ a=lo;b=mid;f=t/0.5; } else { a=mid;b=hi;f=(t-0.5)/0.5; }
+  return `rgb(${lerp(a[0],b[0],f)},${lerp(a[1],b[1],f)},${lerp(a[2],b[2],f)})`;
+}
+
+/* ---------------------------- ICONS ----------------------------------- */
+const ico = { fill:"none", stroke:"currentColor", strokeWidth:1.7, strokeLinecap:"round", strokeLinejoin:"round" };
+const IconTrophy=({s=16})=>(<svg width={s} height={s} viewBox="0 0 24 24" {...ico}><path d="M7 4h10v5a5 5 0 0 1-10 0V4Z"/><path d="M7 5H4v1.5A3.5 3.5 0 0 0 7.5 10"/><path d="M17 5h3v1.5A3.5 3.5 0 0 1 16.5 10"/><path d="M12 14v3"/><path d="M9.5 21h5l-.7-4h-3.6l-.7 4Z"/></svg>);
+const IconFlask=({s=16})=>(<svg width={s} height={s} viewBox="0 0 24 24" {...ico}><path d="M9 3h6"/><path d="M10 3v6.2L5.3 17.5A2 2 0 0 0 7 20.6h10a2 2 0 0 0 1.7-3.1L14 9.2V3"/><path d="M7.6 14.5h8.8"/></svg>);
+const IconCal=({s=16})=>(<svg width={s} height={s} viewBox="0 0 24 24" {...ico}><rect x="3" y="5" width="18" height="16" rx="2"/><path d="M3 9.5h18"/><path d="M8 3v4M16 3v4"/><path d="M7.5 13h2M13 13h2M11 17h2"/></svg>);
+const IconOctopus=({s=16})=>(<svg width={s} height={s} viewBox="0 0 24 24" {...ico}><path d="M12 3a5.5 5.5 0 0 1 5.5 5.5V12h-11V8.5A5.5 5.5 0 0 1 12 3Z"/><circle cx="9.7" cy="9" r=".9" fill="currentColor" stroke="none"/><circle cx="14.3" cy="9" r=".9" fill="currentColor" stroke="none"/><path d="M6.5 12c-1.2 2-2.4 2.9-4 3.2 1.6.6 2.4 1.6 2.4 3.3"/><path d="M9.3 12c-.4 2.6-1 4.2-2.6 5.7"/><path d="M12 12v4.8c0 1.5 1 2.4 1 4"/><path d="M14.7 12c.4 2.6 1 4.2 2.6 5.7"/><path d="M17.5 12c1.2 2 2.4 2.9 4 3.2-1.6.6-2.4 1.6-2.4 3.3"/></svg>);
+
+/* ---------------------------- ORACLE ---------------------------------- */
+/* An Elo-free zone. Powered ONLY by 964 real World Cup finals matches
+   (1930–2022), tallied by the initial letter of each nation's name.
+   HIST[X][Y] = [wins, draws, losses] from X's perspective. Pure spurious fun. */
+const HIST = {
+  A:{A:[2,0,2],B:[6,1,9],C:[6,4,5],D:[1,1,0],E:[2,3,3],F:[3,1,4],G:[5,4,11],H:[4,1,0],I:[2,5,7],J:[3,0,0],M:[4,1,0],N:[7,5,4],P:[3,0,3],R:[1,2,2],S:[12,1,5],T:[1,0,0],U:[4,0,2],Y:[0,1,0]},
+  B:{A:[9,1,6],B:[4,0,4],C:[16,5,1],D:[2,0,0],E:[7,3,1],F:[1,1,5],G:[5,0,5],H:[0,1,4],I:[5,2,4],J:[2,1,0],M:[6,4,4],N:[5,2,8],P:[6,3,6],R:[7,0,2],S:[17,11,6],T:[3,1,0],U:[4,1,3],W:[1,0,0],Y:[1,2,2]},
+  C:{A:[5,4,6],B:[1,5,16],C:[5,2,5],D:[0,1,1],E:[1,2,7],F:[1,1,3],G:[3,4,8],H:[2,0,1],I:[5,2,5],J:[4,2,2],K:[0,1,0],M:[2,1,5],N:[3,2,4],P:[1,2,1],R:[5,4,7],S:[10,3,6],T:[1,1,1],U:[6,0,3],Y:[2,0,2]},
+  D:{A:[0,1,1],B:[0,0,2],C:[1,1,0],E:[0,0,1],F:[1,1,2],G:[1,0,0],J:[0,0,1],N:[1,0,1],P:[1,0,0],S:[2,2,2],T:[0,1,0],U:[2,0,0],Y:[0,0,1]},
+  E:{A:[3,3,2],B:[1,3,7],C:[7,2,1],D:[1,0,0],E:[2,0,2],F:[2,1,1],G:[1,2,3],H:[1,0,3],I:[1,0,3],K:[1,0,0],M:[1,1,2],N:[0,4,0],P:[6,1,1],Q:[1,0,0],R:[1,3,4],S:[4,3,4],T:[3,0,0],U:[0,3,4],W:[1,0,0]},
+  F:{A:[4,1,3],B:[5,1,1],C:[3,1,1],D:[2,1,1],E:[1,1,2],G:[1,1,2],H:[3,0,0],I:[1,2,2],K:[1,0,0],M:[3,1,1],N:[3,0,0],P:[5,0,1],R:[0,1,0],S:[5,2,2],T:[1,0,1],U:[1,2,1],Y:[0,0,2]},
+  G:{A:[11,4,5],B:[5,0,5],C:[8,4,3],D:[0,0,1],E:[3,2,1],F:[2,1,1],G:[2,2,2],H:[1,0,1],I:[2,2,4],J:[0,1,1],M:[4,1,1],N:[3,2,2],P:[6,1,2],R:[1,1,0],S:[14,4,6],T:[2,1,0],U:[9,2,2],Y:[4,0,1]},
+  H:{A:[0,1,4],B:[4,1,0],C:[1,0,2],E:[3,0,1],F:[0,0,3],G:[1,0,1],I:[1,0,3],M:[1,0,0],N:[0,1,0],P:[0,0,2],R:[0,0,2],S:[3,2,3],U:[1,0,0],W:[0,1,1],Y:[0,0,1]},
+  I:{A:[7,5,2],B:[4,2,5],C:[5,2,5],E:[3,0,1],F:[2,2,1],G:[4,2,2],H:[3,0,1],I:[0,2,0],J:[1,0,0],M:[2,2,2],N:[5,2,5],P:[2,5,4],R:[1,0,2],S:[6,3,7],U:[5,2,3],W:[1,0,0]},
+  J:{A:[0,0,3],B:[0,1,2],C:[2,2,4],D:[1,0,0],G:[1,1,0],I:[0,0,1],J:[1,0,1],N:[0,0,1],P:[0,1,1],R:[1,0,0],S:[1,1,0],T:[1,0,1]},
+  K:{C:[0,1,0],E:[0,0,1],F:[0,0,1]},
+  M:{A:[0,1,4],B:[4,4,6],C:[5,1,2],E:[2,1,1],F:[1,1,3],G:[1,1,4],H:[0,0,1],I:[2,2,2],N:[0,2,3],P:[2,3,4],R:[1,1,0],S:[4,3,5],T:[0,0,1],U:[0,1,2],W:[0,1,0],Y:[0,0,1]},
+  N:{A:[4,5,7],B:[8,2,5],C:[4,2,3],D:[1,0,1],E:[0,4,0],F:[0,0,3],G:[2,2,3],H:[0,1,0],I:[5,2,5],J:[1,0,0],M:[3,2,0],P:[0,2,4],Q:[1,0,0],R:[1,2,2],S:[9,4,6],U:[3,0,0],Y:[0,1,0]},
+  P:{A:[3,0,3],B:[6,3,6],C:[1,2,1],D:[0,0,1],E:[1,1,6],F:[1,0,5],G:[2,1,6],H:[2,0,0],I:[4,5,2],J:[1,1,0],M:[4,3,2],N:[4,2,0],P:[4,0,4],R:[1,1,1],S:[7,4,8],T:[2,0,1],U:[2,1,4],Y:[1,1,0]},
+  Q:{E:[0,0,1],N:[0,0,1],S:[0,0,1]},
+  R:{A:[2,2,1],B:[2,0,7],C:[7,4,5],E:[4,3,1],F:[0,1,0],G:[0,1,1],H:[2,0,0],I:[2,0,1],J:[0,0,1],M:[0,1,1],N:[2,2,1],P:[1,1,1],R:[1,2,1],S:[2,5,3],T:[1,1,0],U:[2,0,3],Y:[1,0,0]},
+  S:{A:[5,1,12],B:[6,11,17],C:[6,3,10],D:[2,2,2],E:[4,3,4],F:[2,2,5],G:[6,4,14],H:[3,2,3],I:[7,3,6],J:[0,1,1],M:[5,3,4],N:[6,4,9],P:[8,4,7],Q:[1,0,0],R:[3,5,2],S:[18,6,18],T:[3,2,3],U:[5,9,7],W:[0,1,0],Y:[2,2,2]},
+  T:{A:[0,0,1],B:[0,1,3],C:[1,1,1],D:[0,1,0],E:[0,0,3],F:[1,0,1],G:[0,1,2],J:[1,0,1],M:[1,0,0],P:[1,0,2],R:[0,1,1],S:[3,2,3],U:[0,0,1]},
+  U:{A:[2,0,4],B:[3,1,4],C:[3,0,6],D:[0,0,2],E:[4,3,0],F:[1,2,1],G:[2,2,9],H:[0,0,1],I:[3,2,5],M:[2,1,0],N:[0,0,3],P:[4,1,2],R:[3,0,2],S:[7,9,5],T:[1,0,0],W:[0,1,0],Y:[1,0,2]},
+  W:{B:[0,0,1],E:[0,0,1],H:[1,1,0],I:[0,0,1],M:[0,1,0],S:[0,1,0],U:[0,1,0]},
+  Y:{A:[0,1,0],B:[2,2,1],C:[2,0,2],D:[1,0,0],F:[2,0,0],G:[1,0,4],H:[1,0,0],M:[1,0,0],N:[0,1,0],P:[0,1,1],R:[0,0,1],S:[2,2,2],U:[2,0,1]},
+};
+function teamInit(name){ const n=name.normalize("NFD").replace(/[\u0300-\u036f]/g,"").toUpperCase(); for(const ch of n){ if(ch>="A"&&ch<="Z") return ch; } return "?"; }
+function hRec(X,Y){ const a=HIST[X]&&HIST[X][Y]; if(!a) return null; const [w,d,l]=a; const n=w+d+l; return n?{w,d,l,n,s:(w+0.5*d)/n}:null; }
+
+function Oracle(){
+  const LETTERS="ABCDEFGHIJKLMNOPQRSTUVWXYZ".split("");
+  const mono="'IBM Plex Mono',monospace";
+  const CELL=21;
+  const active = Object.keys(HIST);
+
+  const favourites = useMemo(()=>(
+    TEAM_NAMES.map(t=>{
+      const X=teamInit(t); let s=0,n=0;
+      TEAM_NAMES.forEach(u=>{ if(u===t) return; const r=hRec(X,teamInit(u)); if(r){ s+=r.s; n++; } });
+      return { t, X, avg: n? s/n : 0.5 };
+    }).sort((a,b)=> b.avg-a.avg)
+  ),[]);
+  const top3 = favourites.slice(0,3);
+  const groups = GROUP_LETTERS.map(g=>({ g, games: FIXTURES.filter(f=>f.g===g) }));
+
+  return (
+    <div className="fade">
+      {/* header */}
+      <div className="card" style={{padding:"22px 24px", marginBottom:16}}>
+        <div style={{display:"flex", alignItems:"center", gap:12}}>
+          <span style={{color:C.pink}}><IconOctopus s={30}/></span>
+          <div>
+            <div style={{fontFamily:"'Fraunces',serif", fontSize:26, fontWeight:600, lineHeight:1}}>The Octopus Oracle</div>
+            <div style={{color:C.inkSoft, fontSize:13, marginTop:4}}>No Elo. No ratings. Just <b style={{color:C.ink}}>964 World Cup matches</b> and the letters they were filed under.</div>
+          </div>
+        </div>
+        <p style={{fontSize:13.5, color:C.inkSoft, margin:"14px 0 0", maxWidth:780, lineHeight:1.55}}>
+          A separate universe from the rest of the app. We took every World Cup finals match from 1930–2022 and asked one absurd question: when a country whose name starts with <b style={{color:C.ink}}>X</b> met a country starting with <b style={{color:C.ink}}>Y</b>, who won? The heatmap is that real record; the picks below “forecast” 2026 from nothing but those initials. It is gloriously meaningless — a tribute to Paul the Octopus and Oxford’s gag that a pattern in initials is just noise that learned to pose for the camera.
+        </p>
+        <p style={{fontSize:11.5, color:C.inkSoft, margin:"10px 0 0", fontStyle:"italic"}}>
+          History only exists by country, not by who was on the bench — so these are team-name initials, exactly like the original. A coaches’-surname version would have no real matches behind it.
+        </p>
+      </div>
+
+      {/* chosen ones */}
+      <div className="card" style={{padding:"18px 22px", marginBottom:16}}>
+        <div style={{fontFamily:mono, fontSize:10.5, letterSpacing:1, color:C.inkSoft, textTransform:"uppercase", marginBottom:12}}>The octopus’s chosen ones · best initials in WC history</div>
+        <div style={{display:"grid", gridTemplateColumns:"repeat(auto-fit,minmax(210px,1fr))", gap:12}}>
+          {top3.map((f,i)=>(
+            <div key={f.t} style={{display:"flex", alignItems:"center", gap:12, padding:"10px 12px", borderRadius:10, background:C.bg, border:`1px solid ${i===0?C.pink:C.line}`}}>
+              <span style={{fontFamily:"'Fraunces',serif", fontSize:24, color:C.pink, width:18}}>{i+1}</span>
+              <span style={{fontSize:26}}>{TEAMS[f.t].fl}</span>
+              <div style={{minWidth:0}}>
+                <div style={{fontWeight:600, fontSize:14}}>{f.t}</div>
+                <div style={{fontFamily:mono, fontSize:11, color:C.inkSoft}}>initial “{f.X}” · {Math.round(f.avg*100)}% historic win-rate</div>
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      {/* heatmap */}
+      <div className="card" style={{padding:"20px 22px"}}>
+        <div style={{display:"flex", justifyContent:"space-between", alignItems:"center", flexWrap:"wrap", gap:10, marginBottom:14}}>
+          <div style={{fontFamily:mono, fontSize:10.5, letterSpacing:1, color:C.inkSoft, textTransform:"uppercase"}}>WC 1930–2022 · row initial beats column initial</div>
+          <div style={{display:"flex", alignItems:"center", gap:8, fontFamily:mono, fontSize:10, color:C.inkSoft}}>
+            <span>loses</span>
+            <span style={{width:120, height:10, borderRadius:5, background:`linear-gradient(90deg, ${diverge(0)}, ${diverge(0.5)}, ${diverge(1)})`, border:`1px solid ${C.line}`}}/>
+            <span>wins</span>
+          </div>
+        </div>
+        <div style={{overflowX:"auto", paddingBottom:6}}>
+          <div style={{display:"inline-block", fontFamily:mono}}>
+            <div style={{display:"flex", marginLeft:26}}>
+              {LETTERS.map(L=>(<div key={L} style={{width:CELL, textAlign:"center", fontSize:9.5, color:active.includes(L)?C.ink:"#D9CDD2"}}>{L}</div>))}
+            </div>
+            {LETTERS.map(R=>(
+              <div key={R} style={{display:"flex", alignItems:"center"}}>
+                <div style={{width:24, textAlign:"right", paddingRight:4, fontSize:9.5, color:active.includes(R)?C.ink:"#D9CDD2"}}>{R}</div>
+                {LETTERS.map(Cc=>{
+                  const r=hRec(R,Cc);
+                  const alpha = r ? Math.min(1, 0.25 + r.n/14) : 1;
+                  return (
+                    <div key={Cc}
+                      title={r ? `${R} vs ${Cc}: ${Math.round(r.s*100)}% — ${r.w}W ${r.d}D ${r.l}L (n=${r.n})` : `${R} vs ${Cc}: never met at a World Cup`}
+                      style={{width:CELL, height:CELL, boxSizing:"border-box",
+                        background: r ? diverge(r.s) : "#F3ECEE", opacity: alpha,
+                        border:`1px solid ${C.bg}`}}/>
+                  );
+                })}
+              </div>
+            ))}
+            <div style={{marginLeft:26, marginTop:6, fontSize:9.5, color:C.inkSoft}}>← loser initial →</div>
+          </div>
+        </div>
+        <p style={{fontSize:11.5, color:C.inkSoft, marginTop:12, fontStyle:"italic"}}>Faded = few historical meetings (small sample). Hover a cell for the exact W–D–L. Blank = those initials never met at a World Cup.</p>
+      </div>
+
+      {/* predictions */}
+      <div className="card" style={{padding:"20px 22px", marginTop:16}}>
+        <div style={{fontFamily:mono, fontSize:10.5, letterSpacing:1, color:C.inkSoft, textTransform:"uppercase", marginBottom:4}}>The octopus predicts the group stage</div>
+        <div style={{fontSize:12.5, color:C.inkSoft, marginBottom:16}}>Every pick is decided <b style={{color:C.ink}}>only</b> by the two nations’ initials and their World Cup record — nothing else. Please do not bet on this.</div>
+        <div style={{display:"grid", gridTemplateColumns:"repeat(auto-fill,minmax(300px,1fr))", gap:14}}>
+          {groups.map(({g,games})=>(
+            <div key={g} style={{border:`1px solid ${C.line}`, borderRadius:12, padding:"12px 14px"}}>
+              <div style={{fontFamily:"'Fraunces',serif", fontSize:16, fontWeight:600, marginBottom:6}}>Group {g}</div>
+              {games.map((f,i)=>{
+                const X=teamInit(f.home), Y=teamInit(f.away);
+                const r=hRec(X,Y);
+                const pick = r ? (r.s>=0.5? f.home : f.away) : null;
+                const conf = r ? Math.round(Math.max(r.s,1-r.s)*100) : null;
+                const thin = r && r.n<5;
+                return (
+                  <div key={i} style={{padding:"7px 0", borderTop:i?`1px solid ${C.bg2}`:"none"}}>
+                    <div style={{display:"flex", justifyContent:"space-between", fontSize:12.5, marginBottom:3}}>
+                      <span style={{whiteSpace:"nowrap"}}><span style={{marginRight:5}}>{TEAMS[f.home].fl}</span>{f.home} <span style={{color:C.inkSoft}}>({X})</span></span>
+                      <span style={{color:C.inkSoft, padding:"0 6px"}}>v</span>
+                      <span style={{whiteSpace:"nowrap"}}>{f.away} <span style={{color:C.inkSoft}}>({Y})</span><span style={{marginLeft:5}}>{TEAMS[f.away].fl}</span></span>
+                    </div>
+                    {pick ? (
+                      <div style={{display:"inline-flex", alignItems:"center", gap:5, fontFamily:mono, fontSize:11, color:C.pinkDeep}}>
+                        <IconOctopus s={12}/> {pick} <span style={{color:C.inkSoft}}>{conf}% · n={r.n}{thin?" · thin sample":""}</span>
+                      </div>
+                    ) : (
+                      <div style={{fontFamily:mono, fontSize:11, color:C.inkSoft}}>octopus abstains — {X} &amp; {Y} have no WC history</div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ---------------------------- BRACKET --------------------------------- */
+const IconBracket=({s=16})=>(<svg width={s} height={s} viewBox="0 0 24 24" {...ico}><path d="M3 5h4M3 9h4M7 5v4M7 7h3"/><path d="M3 15h4M3 19h4M7 15v4M7 17h3"/><path d="M10 7v10M10 12h4"/><path d="M14 12h3"/></svg>);
+
+// expected W/D/L + expected goals from current Elo (analytic, no sim)
+function expWDL(elo, a, b){
+  const [lamA, lamB] = lambdas(elo[a], elo[b], HOSTS.has(a), HOSTS.has(b), false);
+  const pmf=(l,k)=>Math.exp(-l)*Math.pow(l,k)/factorial(k);
+  let w=0,d=0,los=0;
+  for(let i=0;i<=9;i++) for(let j=0;j<=9;j++){ const p=pmf(lamA,i)*pmf(lamB,j); if(i>j)w+=p; else if(i===j)d+=p; else los+=p; }
+  const s=w+d+los; return { w:w/s, d:d/s, l:los/s, lamA, lamB };
+}
+
+// deterministic "most likely" projection of the whole tournament
+function projectTournament(locked){
+  const elo = buildCurrentElo(locked);
+  const acc = {}; TEAM_NAMES.forEach(t=>acc[t]={pts:0,gf:0,ga:0});
+  const fbg = {}; GROUP_LETTERS.forEach(g=>fbg[g]=[]);
+  FIXTURES.forEach(f=>{
+    const lk = locked[f.id]; let gh,ga,played=false;
+    if(lk){ gh=lk.ga; ga=lk.gb; played=true;
+      acc[f.home].gf+=gh; acc[f.home].ga+=ga; acc[f.away].gf+=ga; acc[f.away].ga+=gh;
+      if(gh>ga) acc[f.home].pts+=3; else if(ga>gh) acc[f.away].pts+=3; else { acc[f.home].pts++; acc[f.away].pts++; }
+    } else {
+      const e = expWDL(elo, f.home, f.away); gh=Math.round(e.lamA); ga=Math.round(e.lamB);
+      acc[f.home].pts += 3*e.w + e.d; acc[f.away].pts += 3*e.l + e.d;
+      acc[f.home].gf += e.lamA; acc[f.home].ga += e.lamB; acc[f.away].gf += e.lamB; acc[f.away].ga += e.lamA;
+    }
+    fbg[f.g].push({ id:f.id, home:f.home, away:f.away, gh, ga, played });
+  });
+  const tables={};
+  GROUP_LETTERS.forEach(g=>{
+    tables[g] = TEAM_NAMES.filter(t=>TEAMS[t].g===g)
+      .map(t=>({ team:t, pts:acc[t].pts, gf:acc[t].gf, gd:acc[t].gf-acc[t].ga }))
+      .sort((x,y)=> y.pts-x.pts || y.gd-x.gd || y.gf-x.gf || TEAMS[y.team].elo-TEAMS[x.team].elo);
+  });
+  const winners={}, runners={}, thirds={}, pool=[];
+  GROUP_LETTERS.forEach(g=>{ const r=tables[g]; winners[g]=r[0].team; runners[g]=r[1].team; thirds[g]=r[2].team;
+    pool.push({ g, pts:r[2].pts, gd:r[2].gd, gf:r[2].gf }); });
+  const best8 = pool.sort((x,y)=> y.pts-x.pts || y.gd-x.gd || y.gf-x.gf).slice(0,8).map(p=>p.g);
+  const tassign = assignThirds(best8);
+  const resolve = (sp, i)=> sp.t==="W" ? winners[sp.g] : sp.t==="R" ? runners[sp.g] : thirds[tassign[i]];
+  const koMatch = (a,b)=>{
+    const [lamA,lamB] = lambdas(elo[a], elo[b], HOSTS.has(a), HOSTS.has(b), true);
+    const eA = elo[a]+(HOSTS.has(a)?30:0), eB = elo[b]+(HOSTS.has(b)?30:0);
+    return { a, b, ga:Math.round(lamA), gb:Math.round(lamB), winner: eA>=eB ? a : b };
+  };
+  const r32 = R32.map((m,i)=> koMatch(resolve(m.a,i), resolve(m.b,i)));
+  const r16 = R16_PAIRS.map(([p,q])=> koMatch(r32[p].winner, r32[q].winner));
+  const qf  = QF_PAIRS.map(([p,q])=> koMatch(r16[p].winner, r16[q].winner));
+  const sf  = SF_PAIRS.map(([p,q])=> koMatch(qf[p].winner, qf[q].winner));
+  const final = koMatch(sf[0].winner, sf[1].winner);
+  return { tables, fbg, r32, r16, qf, sf, final, champion:final.winner };
+}
+
+// real group standings from played (locked) results only
+function realStandings(locked){
+  const acc={}; TEAM_NAMES.forEach(t=>acc[t]={P:0,W:0,D:0,L:0,GF:0,GA:0});
+  FIXTURES.forEach(f=>{ const lk=locked[f.id]; if(!lk) return;
+    const gh=lk.ga, ga=lk.gb;
+    acc[f.home].P++; acc[f.away].P++;
+    acc[f.home].GF+=gh; acc[f.home].GA+=ga; acc[f.away].GF+=ga; acc[f.away].GA+=gh;
+    if(gh>ga){ acc[f.home].W++; acc[f.away].L++; }
+    else if(ga>gh){ acc[f.away].W++; acc[f.home].L++; }
+    else { acc[f.home].D++; acc[f.away].D++; }
+  });
+  const tab={};
+  GROUP_LETTERS.forEach(g=>{
+    tab[g]=TEAM_NAMES.filter(t=>TEAMS[t].g===g).map(t=>{
+      const a=acc[t]; return { team:t, ...a, GD:a.GF-a.GA, Pts:a.W*3+a.D };
+    }).sort((x,y)=> y.Pts-x.Pts || y.GD-x.GD || y.GF-x.GF || TEAMS[y.team].elo-TEAMS[x.team].elo);
+  });
+  return tab;
+}
+
+// inline score entry for one fixture (writes to the shared locked state)
+function GFix({f, locked, lockResult, clearResult, pred}){
+  const mono="'IBM Plex Mono',monospace";
+  const lk=locked[f.id];
+  const [h,setH]=useState(lk?String(lk.ga):"");
+  const [a,setA]=useState(lk?String(lk.gb):"");
+  useEffect(()=>{ setH(lk?String(lk.ga):""); setA(lk?String(lk.gb):""); },[lk]);
+  const sync=(hh,aa)=>{ if(hh!==""&&aa!==""){ lockResult(f.id,+hh,+aa); } else if(lk){ clearResult(f.id); } };
+  const onH=v=>{ v=v.replace(/[^0-9]/g,"").slice(0,2); setH(v); sync(v,a); };
+  const onA=v=>{ v=v.replace(/[^0-9]/g,"").slice(0,2); setA(v); sync(h,v); };
+  const inp={width:26, height:23, textAlign:"center", border:`1px solid ${lk?C.pink:C.line}`,
+    borderRadius:6, fontFamily:mono, fontSize:13, background:"#fff", color:C.ink, outline:"none"};
+  return (
+    <div style={{display:"grid", gridTemplateColumns:"1fr auto 1fr", alignItems:"center", gap:6, padding:"3px 0"}}>
+      <span style={{textAlign:"right", whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis", fontSize:11.5}}>
+        {f.home} <span style={{fontSize:13}}>{TEAMS[f.home].fl}</span>
+      </span>
+      <span style={{display:"flex", alignItems:"center", gap:3}}>
+        <input value={h} onChange={e=>onH(e.target.value)} placeholder={String(pred?.gh ?? "")} style={inp} inputMode="numeric"/>
+        <span style={{color:C.inkSoft, fontSize:11}}>–</span>
+        <input value={a} onChange={e=>onA(e.target.value)} placeholder={String(pred?.ga ?? "")} style={inp} inputMode="numeric"/>
+      </span>
+      <span style={{whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis", fontSize:11.5}}>
+        <span style={{fontSize:13}}>{TEAMS[f.away].fl}</span> {f.away}
+      </span>
+    </div>
+  );
+}
+
+function Bracket({probs, locked, lockResult, clearResult}){
+  const mono="'IBM Plex Mono',monospace";
+  const trunc=(s,n)=> s.length>n ? s.slice(0,n-1)+"\u2026" : s;
+  const proj = useMemo(()=> projectTournament(locked), [locked]);
+  const stand = useMemo(()=> realStandings(locked), [locked]);
+  const predById = useMemo(()=>{ const m={}; GROUP_LETTERS.forEach(g=>proj.fbg[g].forEach(x=>{m[x.id]=x;})); return m; }, [proj]);
+
+  // ---- SVG bracket geometry ----
+  const CW=150, CH=44, UNIT=56, GAPH=46, PADT=30;
+  const rounds=[proj.r32, proj.r16, proj.qf, proj.sf, [proj.final]];
+  const pm=[null, R16_PAIRS, QF_PAIRS, SF_PAIRS, [[0,1]]];
+  // leaf order so the tree's (non-adjacent) pairings stack without crossing lines
+  const LEAF=[10,0,3,9,5,4,1,6,14,13,2,11,7,12,8,15];
+  const pos={}; LEAF.forEach((idx,p)=>pos[idx]=p);
+  const yc=[]; yc[0]=proj.r32.map((_,j)=> pos[j]*UNIT + CH/2 + PADT);
+  for(let r=1;r<5;r++){ yc[r]=rounds[r].map((_,k)=>{ const [i,j]=pm[r][k]; return (yc[r-1][i]+yc[r-1][j])/2; }); }
+  const colX=r=> r*(CW+GAPH);
+  const Wd=colX(5)+150, Ht=proj.r32.length*UNIT + PADT + 12;
+  const labels=["Round of 32","Round of 16","Quarters","Semis","Final"];
+
+  const conns=[];
+  for(let r=1;r<5;r++){ rounds[r].forEach((_,k)=>{ const [i,j]=pm[r][k]; const cxR=colX(r-1)+CW, px=colX(r), midX=(cxR+px)/2;
+    [i,j].forEach((c,ci)=> conns.push(<path key={`c${r}-${k}-${ci}`} d={`M${cxR} ${yc[r-1][c]} H${midX} V${yc[r][k]} H${px}`} fill="none" stroke={C.line} strokeWidth="1.3"/>));
+  }); }
+  conns.push(<path key="cw" d={`M${colX(4)+CW} ${yc[4][0]} H${colX(5)}`} fill="none" stroke={C.line} strokeWidth="1.3"/>);
+
+  const cards=[];
+  rounds.forEach((round,r)=> round.forEach((tie,k)=>{
+    const x=colX(r), top=yc[r][k]-CH/2;
+    cards.push(
+      <g key={`m${r}-${k}`}>
+        <rect x={x} y={top} width={CW} height={CH} rx="7" fill={C.surface} stroke={C.line}/>
+        {[[tie.a,tie.ga],[tie.b,tie.gb]].map(([t,gg],ri)=>{
+          const win=t===tie.winner, ry=top+ri*(CH/2);
+          return (
+            <g key={ri}>
+              {win && <rect x={x+1.5} y={ry+1.5} width={CW-3} height={CH/2-3} rx="5" fill={C.pinkSoft}/>}
+              {ri===1 && <line x1={x+6} y1={top+CH/2} x2={x+CW-6} y2={top+CH/2} stroke={C.bg2} strokeWidth="1"/>}
+              <text x={x+9} y={ry+CH/4} dominantBaseline="central" fontSize="12">{TEAMS[t]?.fl}</text>
+              <text x={x+27} y={ry+CH/4} dominantBaseline="central" fontSize="11" fontFamily="'IBM Plex Sans',sans-serif" fill={win?C.pinkDeep:C.ink} fontWeight={win?600:400}>{trunc(t,13)}</text>
+              <text x={x+CW-9} y={ry+CH/4} dominantBaseline="central" textAnchor="end" fontSize="10.5" fontFamily={mono} fill="#BCB2C4" fontWeight={400} fontStyle="italic">{gg}</text>
+            </g>
+          );
+        })}
+      </g>
+    );
+  }));
+
+  const wx=colX(5)+20, wy=yc[4][0], champ=proj.champion;
+  const winnerEl=(
+    <g key="winner">
+      <g transform={`translate(${wx+38},${wy-66}) scale(1.5)`} fill="none" stroke={C.gold} strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
+        <path d="M7 4h10v5a5 5 0 0 1-10 0V4Z"/><path d="M7 5H4v1.5A3.5 3.5 0 0 0 7.5 10"/><path d="M17 5h3v1.5A3.5 3.5 0 0 1 16.5 10"/><path d="M12 14v3"/><path d="M9.5 21h5l-.7-4h-3.6l-.7 4Z"/>
+      </g>
+      <text x={wx+62} y={wy-2} textAnchor="middle" fontSize="30">{TEAMS[champ]?.fl}</text>
+      <text x={wx+62} y={wy+26} textAnchor="middle" fontSize="17" fontFamily="'Fraunces',serif" fontWeight="600" fill={C.ink}>{champ}</text>
+      <text x={wx+62} y={wy+42} textAnchor="middle" fontSize="9" fontFamily={mono} fill={C.inkSoft} letterSpacing="1">PROJECTED WINNER</text>
+    </g>
+  );
+  const labelEls=labels.map((lab,r)=>(
+    <text key={`l${r}`} x={colX(r)+CW/2} y={16} textAnchor="middle" fontSize="10" fontFamily={mono} fill={C.inkSoft} letterSpacing="1">{lab.toUpperCase()}</text>
+  ));
+  labelEls.push(<text key="lw" x={wx+62} y={16} textAnchor="middle" fontSize="10" fontFamily={mono} fill={C.inkSoft} letterSpacing="1">WINNER</text>);
+
+  return (
+    <div className="fade">
+      <div className="card" style={{padding:"20px 22px", marginBottom:16}}>
+        <div style={{display:"flex", alignItems:"center", gap:12}}>
+          <span style={{color:C.pink}}><IconBracket s={26}/></span>
+          <div>
+            <div style={{fontFamily:"'Fraunces',serif", fontSize:24, fontWeight:600, lineHeight:1}}>Live bracket &amp; groups</div>
+            <div style={{color:C.inkSoft, fontSize:13, marginTop:4}}>Enter results in the group tables below — standings and the projected bracket update instantly.</div>
+          </div>
+        </div>
+      </div>
+
+      {/* knockout bracket (SVG, connected) */}
+      <div className="card" style={{padding:"14px 16px", marginBottom:18}}>
+        <div style={{overflowX:"auto"}}>
+          <svg width={Wd} height={Ht} viewBox={`0 0 ${Wd} ${Ht}`} style={{display:"block"}}>
+            {conns}{cards}{winnerEl}{labelEls}
+          </svg>
+        </div>
+        <p style={{fontSize:11.5, color:C.inkSoft, margin:"4px 4px 0", fontStyle:"italic"}}>Projected path — favourite advances; the faint italic scores are <b>predictions</b>, not results. The Title Race tab holds the full Monte Carlo probabilities.</p>
+      </div>
+
+      {/* live group tables + entry */}
+      <div style={{fontFamily:mono, fontSize:10.5, letterSpacing:1, color:C.inkSoft, textTransform:"uppercase", margin:"4px 2px 12px"}}>Groups A–L · enter results, collect the table</div>
+      <div style={{display:"grid", gridTemplateColumns:"repeat(auto-fill,minmax(330px,1fr))", gap:14}}>
+        {GROUP_LETTERS.map(g=>(
+          <div key={g} className="card" style={{padding:"14px 16px"}}>
+            <div style={{display:"flex", justifyContent:"space-between", alignItems:"baseline", marginBottom:8}}>
+              <span style={{fontFamily:"'Fraunces',serif", fontSize:18, fontWeight:600}}>Group {g}</span>
+              <span style={{fontFamily:mono, fontSize:8.5, color:C.inkSoft, letterSpacing:.5}}>PL · GF:GA · GD · PTS · ADV</span>
+            </div>
+            {/* header row */}
+            <div style={{display:"grid", gridTemplateColumns:"13px 1fr 20px 44px 28px 26px 40px", gap:3, padding:"0 3px 4px", fontFamily:mono, fontSize:8.5, color:C.inkSoft, textTransform:"uppercase"}}>
+              <span/><span/><span style={{textAlign:"right"}}>Pl</span><span style={{textAlign:"right"}}>GF:GA</span><span style={{textAlign:"right"}}>GD</span><span style={{textAlign:"right"}}>Pt</span><span style={{textAlign:"right"}}>Adv</span>
+            </div>
+            {stand[g].map((r,i)=>(
+              <div key={r.team} style={{display:"grid", gridTemplateColumns:"13px 1fr 20px 44px 28px 26px 40px", gap:3, alignItems:"center",
+                padding:"4px 3px", borderRadius:6,
+                background: i<2 ? "rgba(17,181,196,0.10)" : i===2 ? "rgba(232,163,61,0.12)" : "transparent", fontSize:12}}>
+                <span style={{color:C.inkSoft, fontFamily:mono, fontSize:10}}>{i+1}</span>
+                <span style={{display:"flex", alignItems:"center", gap:6, overflow:"hidden", whiteSpace:"nowrap", fontWeight:i<2?600:400}}>
+                  <span style={{fontSize:13}}>{TEAMS[r.team].fl}</span>
+                  <span style={{overflow:"hidden", textOverflow:"ellipsis"}}>{trunc(r.team,12)}</span>
+                </span>
+                <span style={{fontFamily:mono, textAlign:"right", color:C.inkSoft}}>{r.P}</span>
+                <span style={{fontFamily:mono, textAlign:"right", color:C.inkSoft}}>{r.GF}:{r.GA}</span>
+                <span style={{fontFamily:mono, textAlign:"right", color:C.inkSoft}}>{(r.GD>=0?"+":"")+r.GD}</span>
+                <span style={{fontFamily:mono, textAlign:"right", fontWeight:600}}>{r.Pts}</span>
+                <span style={{fontFamily:mono, textAlign:"right", color:C.turqDeep}}>{probs?Math.round(probs[r.team].adv*100)+"%":"\u2014"}</span>
+              </div>
+            ))}
+            <div style={{marginTop:10, paddingTop:8, borderTop:`1px solid ${C.bg2}`}}>
+              <div style={{fontFamily:mono, fontSize:8.5, color:C.inkSoft, letterSpacing:.5, marginBottom:4, textTransform:"uppercase"}}>Results · type a score</div>
+              {FIXTURES.filter(f=>f.g===g).map(f=>(
+                <GFix key={f.id} f={f} locked={locked} lockResult={lockResult} clearResult={clearResult} pred={predById[f.id]}/>
+              ))}
+            </div>
+          </div>
+        ))}
+      </div>
+      <p style={{fontSize:11.5, color:C.inkSoft, marginTop:14, fontStyle:"italic"}}>
+        Standings count only played games; faint numbers in the score boxes are the model’s prediction until you enter the real result. Top two (turquoise) and best thirds advance; ADV% is each team’s Monte-Carlo chance of reaching the knockouts.
+      </p>
+    </div>
+  );
+}
+
+/* ============================== APP =================================== */
+function App(){
+  const [locked, setLocked] = useState({});
+  const [probs, setProbs] = useState(null);
+  const [running, setRunning] = useState(false);
+  const [progress, setProgress] = useState(0);
+  const [tab, setTab] = useState("race");
+  const [sel, setSel] = useState("Spain");
+  const [official, setOfficial] = useState(null);
+  const SIMS = 4000;
+
+  // pull the server's daily forecast (published by the GitHub Action), if present
+  useEffect(()=>{
+    fetch("data/forecast.json", {cache:"no-store"})
+      .then(r=> r.ok ? r.json() : null)
+      .then(d=> { if(d && Array.isArray(d.teams)) setOfficial(d); })
+      .catch(()=>{});
+  }, []);
+
+  // load saved results
+  useEffect(()=>{ try { const r = localStorage.getItem("wc26_results"); if(r) setLocked(JSON.parse(r)); } catch(e){} }, []);
+
+  const persist = useCallback((next)=>{ try { localStorage.setItem("wc26_results", JSON.stringify(next)); } catch(e){} },[]);
+
+  // chunked monte-carlo
+  const run = useCallback(()=>{
+    setRunning(true); setProgress(0);
+    const elo = buildCurrentElo(locked);
+    const acc = {}; TEAM_NAMES.forEach(t=>acc[t]={champ:0,fin:0,sf:0,qf:0,r16:0,r32:0,gw:0,gr:0});
+    let done=0; const CHUNK=200;
+    const step=()=>{
+      const end=Math.min(SIMS, done+CHUNK);
+      for(;done<end;done++) simTournament(elo, locked, acc);
+      setProgress(done/SIMS);
+      if(done<SIMS){ setTimeout(step,0); }
+      else {
+        const out={};
+        TEAM_NAMES.forEach(t=>{
+          const a=acc[t];
+          out[t]={
+            champ:a.champ/SIMS, fin:a.fin/SIMS, sf:a.sf/SIMS, qf:a.qf/SIMS,
+            r16:a.r16/SIMS, r32:a.r32/SIMS, gw:a.gw/SIMS, gr:a.gr/SIMS,
+            adv:a.r32/SIMS, elo:elo[t],
+          };
+        });
+        setProbs(out); setRunning(false);
+      }
+    };
+    setTimeout(step,0);
+  },[locked]);
+
+  useEffect(()=>{ run(); /* re-run when results change */ }, [run]);
+
+  const ranked = useMemo(()=> probs ? [...TEAM_NAMES].sort((a,b)=> probs[b].champ-probs[a].champ || probs[b].fin-probs[a].fin) : [], [probs]);
+  const leader = ranked[0];
+
+  const lockResult=(id,ga,gb)=>{ const next={...locked,[id]:{ga,gb}}; setLocked(next); persist(next); };
+  const clearResult=(id)=>{ const next={...locked}; delete next[id]; setLocked(next); persist(next); };
+  const clearAll=()=>{ setLocked({}); persist({}); };
+
+  return (
+    <div style={{minHeight:"100vh", background:C.bg, color:C.ink, fontFamily:"'IBM Plex Sans',sans-serif"}}>
+      <style>{styles}</style>
+
+      {/* ---- masthead ---- */}
+      <div style={{maxWidth:1180, margin:"0 auto", padding:"28px 22px 0"}}>
+        <div style={{display:"flex", alignItems:"flex-end", justifyContent:"space-between", flexWrap:"wrap", gap:14}}>
+          <div>
+            <div style={{display:"flex", alignItems:"center", gap:10, color:C.turqDeep, fontFamily:"'IBM Plex Mono',monospace", fontSize:11, letterSpacing:2, textTransform:"uppercase"}}>
+              <span style={{width:26, height:3, background:C.turq, borderRadius:2}}/>
+              Elo · Poisson · Monte Carlo · {SIMS.toLocaleString()} sims
+            </div>
+            <h1 style={{fontFamily:"'Fraunces',serif", fontWeight:600, fontSize:"clamp(34px,5vw,58px)", lineHeight:0.96, margin:"8px 0 2px", letterSpacing:-0.5}}>
+              Mundial <span style={{color:C.pink}}>’26</span> <span style={{color:C.inkSoft, fontStyle:"italic", fontWeight:400}}>forecast lab</span>
+            </h1>
+            <p style={{color:C.inkSoft, fontSize:13.5, maxWidth:560, margin:"6px 0 0"}}>
+              48 teams · USA · Canada · México · 11 Jun – 19 Jul. Lock real results in <b style={{color:C.pink}}>Match Center</b> and the whole forecast re-simulates.
+            </p>
+          </div>
+          <button className="btn-primary" onClick={run} disabled={running}>
+            {running ? "Simulating…" : "↻ Re-run forecast"}
+          </button>
+        </div>
+
+        {/* progress */}
+        <div style={{height:4, background:C.bg2, borderRadius:4, marginTop:18, overflow:"hidden"}}>
+          <div style={{height:"100%", width:`${progress*100}%`, background:`linear-gradient(90deg,${C.turq},${C.pink})`, transition:"width .1s"}}/>
+        </div>
+
+        {/* official daily run (from GitHub Actions), if published */}
+        {official && (
+          <div style={{display:"flex", alignItems:"center", gap:12, flexWrap:"wrap",
+            marginTop:16, padding:"10px 14px", borderRadius:10,
+            background:C.turqSoft, border:`1px solid ${C.turq}33`}}>
+            <span style={{display:"flex", alignItems:"center", gap:7, color:C.turqDeep, fontWeight:600, fontSize:12.5}}>
+              <IconCal s={15}/> Daily run
+            </span>
+            <span style={{fontFamily:"'IBM Plex Mono',monospace", fontSize:11, color:C.inkSoft}}>
+              updated {String(official.updated).slice(0,10)} · {official.results_used} result{official.results_used===1?"":"s"} in · {official.n_sims.toLocaleString()} sims
+            </span>
+            <span style={{flex:1}}/>
+            <span style={{display:"flex", gap:12, fontFamily:"'IBM Plex Mono',monospace", fontSize:12}}>
+              {official.teams.slice(0,3).map((t,i)=>(
+                <span key={t.team} style={{color:i===0?C.pinkDeep:C.ink}}>
+                  {TEAMS[t.team]?.fl} {t.team} <b>{(t.champion*100).toFixed(1)}%</b>
+                </span>
+              ))}
+            </span>
+          </div>
+        )}
+
+        {/* tabs */}
+        <div style={{display:"flex", gap:6, marginTop:18, borderBottom:`1px solid ${C.line}`, flexWrap:"wrap"}}>
+          {[["race",IconTrophy,"Title Race"],["bracket",IconBracket,"Bracket"],["team",IconFlask,"Team Lab"],["match",IconCal,"Match Center"],["oracle",IconOctopus,"Oracle"]].map(([k,Icon,l])=>(
+            <button key={k} onClick={()=>setTab(k)} className="tab" style={{
+              display:"flex", alignItems:"center", gap:7,
+              color: tab===k?C.ink:C.inkSoft,
+              borderBottom: tab===k?`2.5px solid ${C.pink}`:"2.5px solid transparent",
+              fontWeight: tab===k?600:500,
+            }}><span style={{color: tab===k?C.pink:C.inkSoft, display:"flex"}}><Icon s={16}/></span>{l}</button>
+          ))}
+        </div>
+      </div>
+
+      <div style={{maxWidth:1180, margin:"0 auto", padding:"22px 22px 70px"}}>
+        {!probs && <div style={{color:C.inkSoft, padding:40, textAlign:"center"}}>Warming up the simulator…</div>}
+        {probs && tab==="race" && <TitleRace probs={probs} ranked={ranked} leader={leader} onPick={(t)=>{setSel(t);setTab("team");}}/>}
+        {probs && tab==="bracket" && <Bracket probs={probs} locked={locked} lockResult={lockResult} clearResult={clearResult}/>}
+        {probs && tab==="team" && <TeamLab probs={probs} sel={sel} setSel={setSel}/>}
+        {probs && tab==="match" && <MatchCenter locked={locked} lockResult={lockResult} clearResult={clearResult} clearAll={clearAll}/>}
+        {tab==="oracle" && <Oracle/>}
+      </div>
+    </div>
+  );
+}
+
+/* --------------------------- TITLE RACE ------------------------------- */
+function TitleRace({probs, ranked, leader, onPick}){
+  const top = ranked.slice(0,3);
+  const maxChamp = probs[leader].champ || 1;
+  return (
+    <div className="fade">
+      {/* podium */}
+      <div style={{display:"grid", gridTemplateColumns:"repeat(auto-fit,minmax(220px,1fr))", gap:14, marginBottom:22}}>
+        {top.map((t,i)=>(
+          <div key={t} className="card" style={{padding:"18px 20px", position:"relative", overflow:"hidden",
+            border: i===0?`1.5px solid ${C.pink}`:`1px solid ${C.line}`}}>
+            {i===0 && <div style={{position:"absolute", inset:0, background:`radial-gradient(120% 90% at 100% 0%, ${C.pinkSoft} 0%, transparent 55%)`}}/>}
+            <div style={{position:"relative"}}>
+              <div style={{fontFamily:"'IBM Plex Mono',monospace", fontSize:11, color:C.inkSoft, letterSpacing:1}}>
+                {["FAVOURITE","2ND FAVOURITE","3RD FAVOURITE"][i]}
+              </div>
+              <div style={{display:"flex", alignItems:"center", gap:10, margin:"6px 0 2px"}}>
+                <span style={{fontSize:30}}>{TEAMS[t].fl}</span>
+                <span style={{fontFamily:"'Fraunces',serif", fontSize:24, fontWeight:600}}>{t}</span>
+              </div>
+              <div style={{display:"flex", alignItems:"baseline", gap:6}}>
+                <span style={{fontFamily:"'IBM Plex Mono',monospace", fontSize:38, fontWeight:600, color:C.pink, lineHeight:1}}>{fmt(probs[t].champ)}</span>
+                <span style={{color:C.inkSoft, fontSize:13}}>% to lift the trophy</span>
+              </div>
+              <div style={{fontSize:12, color:C.inkSoft, marginTop:6, fontFamily:"'IBM Plex Mono',monospace"}}>
+                final {fmt(probs[t].fin)}% · final-4 {fmt(probs[t].sf)}% · Elo {Math.round(probs[t].elo)}
+              </div>
+            </div>
+          </div>
+        ))}
+      </div>
+
+      {/* leaderboard */}
+      <div className="card" style={{padding:0, overflow:"hidden"}}>
+        <div style={{display:"grid", gridTemplateColumns:"34px 1fr 56px 84px 70px 70px 70px", padding:"11px 16px",
+          fontFamily:"'IBM Plex Mono',monospace", fontSize:10.5, letterSpacing:1, color:C.inkSoft, borderBottom:`1px solid ${C.line}`, textTransform:"uppercase"}}>
+          <span>#</span><span>Team</span><span>Grp</span><span style={{textAlign:"right"}}>Champ</span>
+          <span style={{textAlign:"right"}}>Final</span><span style={{textAlign:"right"}}>Last 4</span><span style={{textAlign:"right"}}>Win grp</span>
+        </div>
+        <div style={{maxHeight:560, overflowY:"auto"}}>
+          {ranked.map((t,i)=>{
+            const p=probs[t];
+            return (
+              <div key={t} className="lb-row" onClick={()=>onPick(t)}
+                style={{display:"grid", gridTemplateColumns:"34px 1fr 56px 84px 70px 70px 70px", alignItems:"center",
+                  padding:"9px 16px", borderBottom:`1px solid ${C.bg2}`, cursor:"pointer",
+                  fontFamily:"'IBM Plex Mono',monospace", fontSize:13}}>
+                <span style={{color:C.inkSoft}}>{i+1}</span>
+                <span style={{fontFamily:"'IBM Plex Sans',sans-serif", display:"flex", alignItems:"center", gap:9, fontWeight:500}}>
+                  <span style={{fontSize:18}}>{TEAMS[t].fl}</span>{t}
+                </span>
+                <span style={{color:C.inkSoft}}>{TEAMS[t].g}</span>
+                <span style={{textAlign:"right"}}>
+                  <span className="chip" style={{background:pinkRamp(p.champ/maxChamp), color:p.champ/maxChamp>0.45?"#fff":C.ink}}>{fmt(p.champ)}</span>
+                </span>
+                <span style={{textAlign:"right", color:C.ink}}>{fmt(p.fin)}</span>
+                <span style={{textAlign:"right", color:C.inkSoft}}>{fmt(p.sf)}</span>
+                <span style={{textAlign:"right", color:C.inkSoft}}>{fmt(p.gw)}</span>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+      <p style={{fontSize:11.5, color:C.inkSoft, marginTop:12, fontStyle:"italic"}}>
+        Tap any team for its full path. Cells shaded on a pink intensity ramp (deeper = more likely).
+      </p>
+    </div>
+  );
+}
+
+/* ---------------------------- TEAM LAB -------------------------------- */
+const STAGES = [
+  ["Group","start"],["R32","r32"],["R16","r16"],["QF","qf"],["SF","sf"],["Final","fin"],["Title","champ"]
+];
+function TeamLab({probs, sel, setSel}){
+  const p = probs[sel];
+  const g = TEAMS[sel].g;
+  const groupFix = FIXTURES.filter(f=>f.g===g);
+  // build chronological "fixtures for this team" (group)
+  const myFix = groupFix.filter(f=>f.home===sel||f.away===sel).map(f=>{
+    const opp = f.home===sel?f.away:f.home;
+    const r = wdl(sel, opp);
+    const [lf,la] = lambdas(TEAMS[sel].elo, TEAMS[opp].elo, HOSTS.has(sel), HOSTS.has(opp), false);
+    return { opp, date:f.date, pred:`${Math.round(lf)}–${Math.round(la)}`, ...r };
+  });
+  const path = STAGES.map(([label,key])=> key==="start" ? 1 : p[key]);
+
+  return (
+    <div className="fade">
+      {/* selector */}
+      <div style={{display:"flex", flexWrap:"wrap", gap:6, marginBottom:18}}>
+        {[...TEAM_NAMES].sort((a,b)=>probs[b].champ-probs[a].champ).map(t=>(
+          <button key={t} onClick={()=>setSel(t)} className="flagchip" style={{
+            background: t===sel?C.pink:C.surface, color:t===sel?"#fff":C.ink,
+            border:`1px solid ${t===sel?C.pink:C.line}`}}>
+            <span style={{fontSize:15}}>{TEAMS[t].fl}</span>{t}
+          </button>
+        ))}
+      </div>
+
+      <div style={{display:"grid", gridTemplateColumns:"minmax(280px,1fr) minmax(320px,1.4fr)", gap:16, alignItems:"start"}}>
+        {/* left: headline + fixtures */}
+        <div className="card" style={{padding:"20px 22px"}}>
+          <div style={{display:"flex", alignItems:"center", gap:12}}>
+            <span style={{fontSize:42}}>{TEAMS[sel].fl}</span>
+            <div>
+              <div style={{fontFamily:"'Fraunces',serif", fontSize:26, fontWeight:600, lineHeight:1}}>{sel}</div>
+              <div style={{fontFamily:"'IBM Plex Mono',monospace", fontSize:12, color:C.inkSoft, marginTop:3}}>Group {g} · Elo {Math.round(p.elo)}</div>
+            </div>
+          </div>
+
+          <div style={{display:"grid", gridTemplateColumns:"1fr 1fr", gap:10, marginTop:18}}>
+            <Stat label="Champion" val={fmt(p.champ)} big accent={C.pink}/>
+            <Stat label="Reach final" val={fmt(p.fin)} accent={C.turqDeep}/>
+            <Stat label="Win group" val={fmt(p.gw)} accent={C.turqDeep}/>
+            <Stat label="Advance (R32)" val={fmt(p.adv)} accent={C.turqDeep}/>
+          </div>
+
+          <div style={{fontFamily:"'IBM Plex Mono',monospace", fontSize:10.5, letterSpacing:1, color:C.inkSoft, margin:"22px 0 10px", textTransform:"uppercase"}}>Group fixtures</div>
+          {myFix.map((m,i)=>(
+            <div key={i} style={{marginBottom:13}}>
+              <div style={{display:"flex", justifyContent:"space-between", fontSize:13, marginBottom:5}}>
+                <span style={{fontWeight:500}}><span style={{fontSize:15, marginRight:6}}>{TEAMS[m.opp].fl}</span>vs {m.opp}</span>
+                <span style={{color:C.inkSoft, fontFamily:"'IBM Plex Mono',monospace", fontSize:11.5}}>{m.date} · <span style={{color:C.pink, fontWeight:600}}>{m.pred}</span></span>
+              </div>
+              <div style={{display:"flex", height:18, borderRadius:5, overflow:"hidden", fontFamily:"'IBM Plex Mono',monospace", fontSize:10}}>
+                <Bar w={m.w} bg={C.pink} fg="#fff" t={`W ${Math.round(m.w*100)}`}/>
+                <Bar w={m.d} bg={C.bg2} fg={C.inkSoft} t={`D ${Math.round(m.d*100)}`}/>
+                <Bar w={m.l} bg={C.turqSoft} fg={C.turqDeep} t={`L ${Math.round(m.l*100)}`}/>
+              </div>
+            </div>
+          ))}
+        </div>
+
+        {/* right: path heatmap */}
+        <div className="card" style={{padding:"20px 22px"}}>
+          <div style={{fontFamily:"'IBM Plex Mono',monospace", fontSize:10.5, letterSpacing:1, color:C.inkSoft, marginBottom:4, textTransform:"uppercase"}}>Projected path · survival heatmap</div>
+          <div style={{fontSize:13, color:C.inkSoft, marginBottom:16}}>Probability of <b style={{color:C.ink}}>still being alive</b> at each stage.</div>
+
+          {/* heat strip */}
+          <div style={{display:"flex", gap:6, marginBottom:8}}>
+            {STAGES.map(([label],i)=>{
+              const v=path[i];
+              return (
+                <div key={label} style={{flex:1, textAlign:"center"}}>
+                  <div style={{height:64, borderRadius:8, background:pinkRamp(v),
+                    display:"flex", alignItems:"center", justifyContent:"center",
+                    color: v>0.45?"#fff":C.ink, fontFamily:"'IBM Plex Mono',monospace", fontWeight:600, fontSize:13.5,
+                    border:`1px solid ${C.line}`}}>
+                    {fmt(v)}
+                  </div>
+                  <div style={{fontSize:11, color:C.inkSoft, marginTop:6, fontWeight:500}}>{label}</div>
+                </div>
+              );
+            })}
+          </div>
+
+          {/* drop between stages */}
+          <div style={{marginTop:18, fontFamily:"'IBM Plex Mono',monospace", fontSize:10.5, letterSpacing:1, color:C.inkSoft, textTransform:"uppercase"}}>Round-by-round odds</div>
+          <div style={{marginTop:8}}>
+            {STAGES.slice(1).map(([label],i)=>{
+              const prev=path[i], cur=path[i+1];
+              const cond = prev>0 ? cur/prev : 0;
+              return (
+                <div key={label} style={{display:"flex", alignItems:"center", gap:10, marginBottom:7}}>
+                  <span style={{width:54, fontSize:12, color:C.inkSoft, textAlign:"right"}}>{label}</span>
+                  <div style={{flex:1, height:12, background:C.bg2, borderRadius:6, overflow:"hidden"}}>
+                    <div style={{height:"100%", width:`${cur*100}%`, background:pinkRamp(Math.min(1,cur*1.4)), borderRadius:6}}/>
+                  </div>
+                  <span style={{width:96, fontSize:11, color:C.inkSoft, fontFamily:"'IBM Plex Mono',monospace"}}>
+                    {fmt(cur)}% · win {Math.round(cond*100)}%
+                  </span>
+                </div>
+              );
+            })}
+          </div>
+          <p style={{fontSize:11.5, color:C.inkSoft, marginTop:16, fontStyle:"italic"}}>
+            “win %” = chance of winning that round <i>given</i> they reached it (the conditional step). The knockout tree is a modelled bracket honouring FIFA’s top-seed separation.
+          </p>
+        </div>
+      </div>
+    </div>
+  );
+}
+function Stat({label,val,big,accent}){
+  return (
+    <div style={{background:C.bg, borderRadius:10, padding:"12px 14px", border:`1px solid ${C.line}`}}>
+      <div style={{fontSize:11, color:C.inkSoft, marginBottom:3}}>{label}</div>
+      <div style={{fontFamily:"'IBM Plex Mono',monospace", fontWeight:600, fontSize:big?30:22, color:accent||C.ink, lineHeight:1}}>
+        {val}<span style={{fontSize:13, color:C.inkSoft}}>%</span>
+      </div>
+    </div>
+  );
+}
+function Bar({w,bg,fg,t}){
+  if(w<0.001) return null;
+  return <div style={{width:`${w*100}%`, background:bg, color:fg, display:"flex", alignItems:"center", justifyContent:"center", minWidth:0, overflow:"hidden", whiteSpace:"nowrap"}}>{w>0.12?t:""}</div>;
+}
+
+/* -------------------------- MATCH CENTER ------------------------------ */
+function MatchCenter({locked, lockResult, clearResult, clearAll}){
+  const byDate = DATE_ORDER.map(d=>({ date:d, games:FIXTURES.filter(f=>f.date===d) }));
+  const playedCount = Object.keys(locked).length;
+  return (
+    <div className="fade">
+      <div className="card" style={{padding:"14px 18px", marginBottom:16, display:"flex", justifyContent:"space-between", alignItems:"center", flexWrap:"wrap", gap:10}}>
+        <div style={{fontSize:13, color:C.inkSoft}}>
+          <b style={{color:C.ink}}>{playedCount}</b> / 72 group results locked · today is <b style={{color:C.turqDeep}}>Jun 7</b> (kick-off Jun 11).
+          Enter a score, press <b style={{color:C.pink}}>Lock</b>, and the forecast updates.
+        </div>
+        {playedCount>0 && <button className="btn-ghost" onClick={clearAll}>Reset all</button>}
+      </div>
+
+      {byDate.map(({date,games})=>(
+        <div key={date} style={{marginBottom:20}}>
+          <div style={{display:"flex", alignItems:"center", gap:10, marginBottom:8}}>
+            <span style={{fontFamily:"'Fraunces',serif", fontSize:18, fontWeight:600}}>{date}</span>
+            <span style={{flex:1, height:1, background:C.line}}/>
+          </div>
+          <div style={{display:"grid", gridTemplateColumns:"repeat(auto-fill,minmax(300px,1fr))", gap:10}}>
+            {games.map(f=><MatchCard key={f.id} f={f} locked={locked[f.id]} onLock={lockResult} onClear={clearResult}/>)}
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+function MatchCard({f, locked, onLock, onClear}){
+  const [ga,setGa]=useState(locked?String(locked.ga):"");
+  const [gb,setGb]=useState(locked?String(locked.gb):"");
+  useEffect(()=>{ setGa(locked?String(locked.ga):""); setGb(locked?String(locked.gb):""); },[locked]);
+  const valid = ga!==""&&gb!==""&&!isNaN(+ga)&&!isNaN(+gb);
+  return (
+    <div className="card" style={{padding:"12px 14px", border:locked?`1.5px solid ${C.pink}`:`1px solid ${C.line}`, background:locked?C.pinkSoft:C.surface}}>
+      <div style={{display:"flex", justifyContent:"space-between", fontFamily:"'IBM Plex Mono',monospace", fontSize:10, color:C.inkSoft, marginBottom:8}}>
+        <span>GROUP {f.g}</span>{locked && <span style={{color:C.pink}}>● LOCKED</span>}
+      </div>
+      <div style={{display:"flex", alignItems:"center", gap:8}}>
+        <Side name={f.home}/>
+        <input className="score" value={ga} onChange={e=>setGa(e.target.value.replace(/[^0-9]/g,"").slice(0,1))}/>
+        <span style={{color:C.inkSoft}}>–</span>
+        <input className="score" value={gb} onChange={e=>setGb(e.target.value.replace(/[^0-9]/g,"").slice(0,1))}/>
+        <Side name={f.away} right/>
+      </div>
+      <div style={{display:"flex", gap:6, marginTop:10}}>
+        <button className="btn-mini" disabled={!valid} style={{background:valid?C.pink:C.bg2, color:valid?"#fff":C.inkSoft}}
+          onClick={()=>onLock(f.id, +ga, +gb)}>{locked?"Update":"Lock"}</button>
+        {locked && <button className="btn-mini" style={{background:C.surface, color:C.inkSoft, border:`1px solid ${C.line}`}} onClick={()=>onClear(f.id)}>Clear</button>}
+      </div>
+    </div>
+  );
+}
+function Side({name, right}){
+  return (
+    <div style={{flex:1, display:"flex", alignItems:"center", gap:7, justifyContent:right?"flex-end":"flex-start", minWidth:0}}>
+      {!right && <span style={{fontSize:18}}>{TEAMS[name].fl}</span>}
+      <span style={{fontSize:12.5, fontWeight:500, whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis"}}>{name}</span>
+      {right && <span style={{fontSize:18}}>{TEAMS[name].fl}</span>}
+    </div>
+  );
+}
+
+/* ----------------------------- STYLES --------------------------------- */
+const styles = `
+@import url('https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,400..700;1,9..144,400&family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap');
+*{box-sizing:border-box;}
+.card{background:${C.surface};border:1px solid ${C.line};border-radius:14px;box-shadow:0 1px 2px rgba(42,36,56,.03),0 8px 24px -18px rgba(42,36,56,.25);}
+.btn-primary{background:${C.pink};color:#fff;border:none;border-radius:10px;padding:11px 18px;font-family:'IBM Plex Sans',sans-serif;font-weight:600;font-size:13.5px;cursor:pointer;transition:.15s;box-shadow:0 6px 16px -8px ${C.pink};}
+.btn-primary:hover:not(:disabled){background:${C.pinkDeep};}
+.btn-primary:disabled{opacity:.55;cursor:default;}
+.btn-ghost{background:transparent;border:1px solid ${C.line};color:${C.inkSoft};border-radius:8px;padding:7px 13px;font-size:12.5px;cursor:pointer;font-family:'IBM Plex Sans',sans-serif;}
+.btn-ghost:hover{border-color:${C.pink};color:${C.pink};}
+.tab{background:none;border:none;padding:10px 14px 11px;font-family:'IBM Plex Sans',sans-serif;font-size:13.5px;cursor:pointer;transition:.15s;}
+.lb-row:hover{background:${C.pinkSoft};}
+.chip{display:inline-block;min-width:42px;padding:3px 8px;border-radius:7px;font-weight:600;text-align:center;}
+.flagchip{display:inline-flex;align-items:center;gap:6px;padding:5px 10px;border-radius:20px;font-size:12px;font-weight:500;cursor:pointer;transition:.12s;font-family:'IBM Plex Sans',sans-serif;}
+.flagchip:hover{border-color:${C.pink}!important;}
+.score{width:38px;height:34px;text-align:center;border:1px solid ${C.line};border-radius:8px;font-family:'IBM Plex Mono',monospace;font-size:17px;font-weight:600;color:${C.ink};background:#fff;}
+.score:focus{outline:none;border-color:${C.pink};box-shadow:0 0 0 3px ${C.pinkSoft};}
+.btn-mini{flex:1;border:none;border-radius:8px;padding:7px;font-size:12px;font-weight:600;cursor:pointer;font-family:'IBM Plex Sans',sans-serif;transition:.12s;}
+.btn-mini:disabled{cursor:default;}
+.fade{animation:fade .35s ease;}
+@keyframes fade{from{opacity:0;transform:translateY(6px);}to{opacity:1;transform:none;}}
+::-webkit-scrollbar{width:9px;height:9px;}
+::-webkit-scrollbar-thumb{background:${C.line};border-radius:6px;}
+@media(max-width:760px){
+  div[style*="minmax(280px,1fr) minmax(320px,1.4fr)"]{grid-template-columns:1fr!important;}
+  div[style*="34px 1fr 56px 84px 70px 70px 70px"]{grid-template-columns:26px 1fr 70px!important;}
+  div[style*="34px 1fr 56px 84px 70px 70px 70px"] > span:nth-child(3),
+  div[style*="34px 1fr 56px 84px 70px 70px 70px"] > span:nth-child(5),
+  div[style*="34px 1fr 56px 84px 70px 70px 70px"] > span:nth-child(6),
+  div[style*="34px 1fr 56px 84px 70px 70px 70px"] > span:nth-child(7){display:none!important;}
+}
+`;
+
+ReactDOM.createRoot(document.getElementById('root')).render(<App/>);
+</script>
+</body>
+</html>
