@@ -8,9 +8,11 @@ name: Daily forecast
 on:
   schedule:
     # World Cup 2026 runs 11 Jun - 19 Jul. Cron has no year field, so we use
-    # date ranges. Runs daily at 08:00 UTC, only during the tournament.
-    - cron: "0 8 11-30 6 *"     # 11-30 June
-    - cron: "0 8 1-19 7 *"      # 1-19 July (through the final)
+    # date ranges. Every 3h during the tournament so evening matches land same
+    # night instead of next morning. Eight runs/day; the workflow no-ops if the
+    # upstream feed hasn't changed.
+    - cron: "0 */3 11-30 6 *"   # 11-30 June, every 3h
+    - cron: "0 */3 1-19 7 *"    # 1-19 July (through the final), every 3h
   workflow_dispatch: {}         # plus a manual "Run workflow" button anytime
 
 permissions:

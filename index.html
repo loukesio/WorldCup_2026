@@ -145,6 +145,50 @@ const FIXTURES = [
 const DATE_ORDER = ["Jun 11","Jun 12","Jun 13","Jun 14","Jun 15","Jun 16","Jun 17","Jun 18",
   "Jun 19","Jun 20","Jun 21","Jun 22","Jun 23","Jun 24","Jun 25","Jun 26","Jun 27"];
 
+/* ----- server feed: data/results.csv → fixture id map ----- */
+// ASCII-fold so Türkiye/Turkiye, Curaçao/Curacao all match
+const _COMBINING = new RegExp("[\\u0300-\\u036f]", "g");
+const _norm = (s) => (s||"").normalize("NFD").replace(_COMBINING,"").trim().toLowerCase();
+const FIXTURE_BY_PAIR = (()=>{
+  const m = {};
+  FIXTURES.forEach(f => { m[_norm(f.home)+"|"+_norm(f.away)] = { id:f.id, swap:false }; });
+  FIXTURES.forEach(f => {                          // fallback: reversed home/away in feed
+    const k = _norm(f.away)+"|"+_norm(f.home);
+    if (!(k in m)) m[k] = { id:f.id, swap:true };
+  });
+  return m;
+})();
+// minimal quote-aware CSV reader for data/results.csv (header + 4 cols)
+function parseResultsCSV(text){
+  if(!text) return [];
+  const lines = text.replace(/\r/g,"").split("\n").filter(Boolean);
+  if (lines.length < 2) return [];
+  const out = [];
+  for (let i=1; i<lines.length; i++){
+    const cells = []; let cur="", inQ=false;
+    for (let j=0; j<lines[i].length; j++){
+      const c = lines[i][j];
+      if (c === '"'){ inQ = !inQ; continue; }
+      if (c === ',' && !inQ){ cells.push(cur); cur=""; continue; }
+      cur += c;
+    }
+    cells.push(cur);
+    if (cells.length >= 4) out.push(cells);
+  }
+  return out;
+}
+function feedFromCSV(text){
+  const feed = {};
+  for (const r of parseResultsCSV(text)){
+    const hs = parseInt(r[2],10), as = parseInt(r[3],10);
+    if (Number.isNaN(hs) || Number.isNaN(as)) continue;
+    const hit = FIXTURE_BY_PAIR[_norm(r[0])+"|"+_norm(r[1])];
+    if (!hit){ console.warn("results.csv: no fixture for", r[0], "vs", r[1]); continue; }
+    feed[hit.id] = hit.swap ? { ga: as, gb: hs } : { ga: hs, gb: as };
+  }
+  return feed;
+}
+
 /* ------------------------- KNOCKOUT TEMPLATE -------------------------- */
 // R32 (FIFA bracket template). T = best-third slot (eligible groups noted).
 const R32 = [
@@ -597,17 +641,21 @@ function realStandings(locked){
 }
 
 // inline score entry for one fixture (writes to the shared locked state)
-function GFix({f, locked, lockResult, clearResult, pred}){
+function GFix({f, locked, feed, overrides, lockResult, clearResult, pred}){
   const mono="'IBM Plex Mono',monospace";
   const lk=locked[f.id];
+  const fromFeed = !!(feed && feed[f.id]);
+  const edited   = !!(overrides && overrides[f.id]);
   const [h,setH]=useState(lk?String(lk.ga):"");
   const [a,setA]=useState(lk?String(lk.gb):"");
   useEffect(()=>{ setH(lk?String(lk.ga):""); setA(lk?String(lk.gb):""); },[lk]);
   const sync=(hh,aa)=>{ if(hh!==""&&aa!==""){ lockResult(f.id,+hh,+aa); } else if(lk){ clearResult(f.id); } };
   const onH=v=>{ v=v.replace(/[^0-9]/g,"").slice(0,2); setH(v); sync(v,a); };
   const onA=v=>{ v=v.replace(/[^0-9]/g,"").slice(0,2); setA(v); sync(h,v); };
-  const inp={width:26, height:23, textAlign:"center", border:`1px solid ${lk?C.pink:C.line}`,
+  const borderColor = edited ? C.pink : (fromFeed ? C.turqDeep : C.line);
+  const inp={width:26, height:23, textAlign:"center", border:`1px solid ${borderColor}`,
     borderRadius:6, fontFamily:mono, fontSize:13, background:"#fff", color:C.ink, outline:"none"};
+  const dot = edited ? C.pink : (fromFeed ? C.turqDeep : null);
   return (
     <div style={{display:"grid", gridTemplateColumns:"1fr auto 1fr", alignItems:"center", gap:6, padding:"3px 0"}}>
       <span style={{textAlign:"right", whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis", fontSize:11.5}}>
@@ -617,6 +665,7 @@ function GFix({f, locked, lockResult, clearResult, pred}){
         <input value={h} onChange={e=>onH(e.target.value)} placeholder={String(pred?.gh ?? "")} style={inp} inputMode="numeric"/>
         <span style={{color:C.inkSoft, fontSize:11}}>–</span>
         <input value={a} onChange={e=>onA(e.target.value)} placeholder={String(pred?.ga ?? "")} style={inp} inputMode="numeric"/>
+        {dot && <span title={edited?"edited (overrides feed)":"from daily feed"} style={{width:6, height:6, borderRadius:6, background:dot, marginLeft:2}}/>}
       </span>
       <span style={{whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis", fontSize:11.5}}>
         <span style={{fontSize:13}}>{TEAMS[f.away].fl}</span> {f.away}
@@ -625,7 +674,7 @@ function GFix({f, locked, lockResult, clearResult, pred}){
   );
 }
 
-function Bracket({probs, locked, lockResult, clearResult}){
+function Bracket({probs, locked, feed, overrides, lockResult, clearResult}){
   const mono="'IBM Plex Mono',monospace";
   const trunc=(s,n)=> s.length>n ? s.slice(0,n-1)+"\u2026" : s;
   const proj = useMemo(()=> projectTournament(locked), [locked]);
@@ -743,7 +792,7 @@ function Bracket({probs, locked, lockResult, clearResult}){
             <div style={{marginTop:10, paddingTop:8, borderTop:`1px solid ${C.bg2}`}}>
               <div style={{fontFamily:mono, fontSize:8.5, color:C.inkSoft, letterSpacing:.5, marginBottom:4, textTransform:"uppercase"}}>Results · type a score</div>
               {FIXTURES.filter(f=>f.g===g).map(f=>(
-                <GFix key={f.id} f={f} locked={locked} lockResult={lockResult} clearResult={clearResult} pred={predById[f.id]}/>
+                <GFix key={f.id} f={f} locked={locked} feed={feed} overrides={overrides} lockResult={lockResult} clearResult={clearResult} pred={predById[f.id]}/>
               ))}
             </div>
           </div>
@@ -758,7 +807,12 @@ function Bracket({probs, locked, lockResult, clearResult}){
 
 /* ============================== APP =================================== */
 function App(){
-  const [locked, setLocked] = useState({});
+  // server-fed results from data/results.csv (read-only)
+  const [feed, setFeed] = useState({});
+  // user overrides — saved to localStorage
+  const [overrides, setOverrides] = useState({});
+  // effective scores used by the simulator: overrides win
+  const locked = useMemo(()=> ({ ...feed, ...overrides }), [feed, overrides]);
   const [probs, setProbs] = useState(null);
   const [running, setRunning] = useState(false);
   const [progress, setProgress] = useState(0);
@@ -775,10 +829,25 @@ function App(){
       .catch(()=>{});
   }, []);
 
-  // load saved results
-  useEffect(()=>{ try { const r = localStorage.getItem("wc26_results"); if(r) setLocked(JSON.parse(r)); } catch(e){} }, []);
+  // pull the server's played results (same workflow), seed the feed layer
+  useEffect(()=>{
+    fetch("data/results.csv", {cache:"no-store"})
+      .then(r => r.ok ? r.text() : "")
+      .then(t => setFeed(feedFromCSV(t)))
+      .catch(()=>{});
+  }, []);
 
-  const persist = useCallback((next)=>{ try { localStorage.setItem("wc26_results", JSON.stringify(next)); } catch(e){} },[]);
+  // load user overrides; migrate the pre-feed `wc26_results` key once
+  useEffect(()=>{
+    try {
+      const cur = localStorage.getItem("wc26_overrides");
+      if (cur) { setOverrides(JSON.parse(cur)); return; }
+      const old = localStorage.getItem("wc26_results");
+      if (old) { setOverrides(JSON.parse(old)); localStorage.setItem("wc26_overrides", old); }
+    } catch(e){}
+  }, []);
+
+  const persist = useCallback((next)=>{ try { localStorage.setItem("wc26_overrides", JSON.stringify(next)); } catch(e){} },[]);
 
   // chunked monte-carlo
   const run = useCallback(()=>{
@@ -812,9 +881,19 @@ function App(){
   const ranked = useMemo(()=> probs ? [...TEAM_NAMES].sort((a,b)=> probs[b].champ-probs[a].champ || probs[b].fin-probs[a].fin) : [], [probs]);
   const leader = ranked[0];
 
-  const lockResult=(id,ga,gb)=>{ const next={...locked,[id]:{ga,gb}}; setLocked(next); persist(next); };
-  const clearResult=(id)=>{ const next={...locked}; delete next[id]; setLocked(next); persist(next); };
-  const clearAll=()=>{ setLocked({}); persist({}); };
+  // editing rules:
+  //   lockResult: if the new score equals the server feed, drop the override (back to "feed" state)
+  //   clearResult: drop the override only — the feed value (if any) re-appears underneath
+  //   clearAll: drop all overrides; feed stays
+  const lockResult = (id, ga, gb) => {
+    const f = feed[id];
+    let next;
+    if (f && f.ga === ga && f.gb === gb) { next = {...overrides}; delete next[id]; }
+    else                                  { next = {...overrides, [id]: {ga, gb}}; }
+    setOverrides(next); persist(next);
+  };
+  const clearResult = (id) => { const next = {...overrides}; delete next[id]; setOverrides(next); persist(next); };
+  const clearAll    = () => { setOverrides({}); persist({}); };
 
   return (
     <div style={{minHeight:"100vh", background:C.bg, color:C.ink, fontFamily:"'IBM Plex Sans',sans-serif"}}>
@@ -883,9 +962,9 @@ function App(){
       <div style={{maxWidth:1180, margin:"0 auto", padding:"22px 22px 70px"}}>
         {!probs && <div style={{color:C.inkSoft, padding:40, textAlign:"center"}}>Warming up the simulator…</div>}
         {probs && tab==="race" && <TitleRace probs={probs} ranked={ranked} leader={leader} onPick={(t)=>{setSel(t);setTab("team");}}/>}
-        {probs && tab==="bracket" && <Bracket probs={probs} locked={locked} lockResult={lockResult} clearResult={clearResult}/>}
+        {probs && tab==="bracket" && <Bracket probs={probs} locked={locked} feed={feed} overrides={overrides} lockResult={lockResult} clearResult={clearResult}/>}
         {probs && tab==="team" && <TeamLab probs={probs} sel={sel} setSel={setSel}/>}
-        {probs && tab==="match" && <MatchCenter locked={locked} lockResult={lockResult} clearResult={clearResult} clearAll={clearAll}/>}
+        {probs && tab==="match" && <MatchCenter locked={locked} feed={feed} overrides={overrides} lockResult={lockResult} clearResult={clearResult} clearAll={clearAll}/>}
         {tab==="oracle" && <Oracle/>}
       </div>
     </div>
@@ -1092,17 +1171,21 @@ function Bar({w,bg,fg,t}){
 }
 
 /* -------------------------- MATCH CENTER ------------------------------ */
-function MatchCenter({locked, lockResult, clearResult, clearAll}){
+function MatchCenter({locked, feed, overrides, lockResult, clearResult, clearAll}){
   const byDate = DATE_ORDER.map(d=>({ date:d, games:FIXTURES.filter(f=>f.date===d) }));
   const playedCount = Object.keys(locked).length;
+  const feedCount = Object.keys(feed).length;
+  const editedCount = Object.keys(overrides).length;
   return (
     <div className="fade">
       <div className="card" style={{padding:"14px 18px", marginBottom:16, display:"flex", justifyContent:"space-between", alignItems:"center", flexWrap:"wrap", gap:10}}>
         <div style={{fontSize:13, color:C.inkSoft}}>
-          <b style={{color:C.ink}}>{playedCount}</b> / 72 group results locked · today is <b style={{color:C.turqDeep}}>Jun 7</b> (kick-off Jun 11).
-          Enter a score, press <b style={{color:C.pink}}>Lock</b>, and the forecast updates.
+          <b style={{color:C.ink}}>{playedCount}</b> / 72 group results locked
+          {feedCount>0 && <> · <b style={{color:C.turqDeep}}>{feedCount}</b> from the daily feed</>}
+          {editedCount>0 && <> · <b style={{color:C.pink}}>{editedCount}</b> edited</>}.
+          {" "}Enter a score and the forecast updates; edits override the feed.
         </div>
-        {playedCount>0 && <button className="btn-ghost" onClick={clearAll}>Reset all</button>}
+        {editedCount>0 && <button className="btn-ghost" onClick={clearAll}>Revert edits</button>}
       </div>
 
       {byDate.map(({date,games})=>(
@@ -1112,22 +1195,27 @@ function MatchCenter({locked, lockResult, clearResult, clearAll}){
             <span style={{flex:1, height:1, background:C.line}}/>
           </div>
           <div style={{display:"grid", gridTemplateColumns:"repeat(auto-fill,minmax(300px,1fr))", gap:10}}>
-            {games.map(f=><MatchCard key={f.id} f={f} locked={locked[f.id]} onLock={lockResult} onClear={clearResult}/>)}
+            {games.map(f=><MatchCard key={f.id} f={f} locked={locked[f.id]} fromFeed={!!feed[f.id]} edited={!!overrides[f.id]} onLock={lockResult} onClear={clearResult}/>)}
           </div>
         </div>
       ))}
     </div>
   );
 }
-function MatchCard({f, locked, onLock, onClear}){
+function MatchCard({f, locked, fromFeed, edited, onLock, onClear}){
   const [ga,setGa]=useState(locked?String(locked.ga):"");
   const [gb,setGb]=useState(locked?String(locked.gb):"");
   useEffect(()=>{ setGa(locked?String(locked.ga):""); setGb(locked?String(locked.gb):""); },[locked]);
   const valid = ga!==""&&gb!==""&&!isNaN(+ga)&&!isNaN(+gb);
+  // border colour reflects state: pink if edited, turquoise if straight from feed, neutral otherwise
+  const accent = edited ? C.pink : (fromFeed ? C.turqDeep : null);
   return (
-    <div className="card" style={{padding:"12px 14px", border:locked?`1.5px solid ${C.pink}`:`1px solid ${C.line}`, background:locked?C.pinkSoft:C.surface}}>
+    <div className="card" style={{padding:"12px 14px", border:accent?`1.5px solid ${accent}`:`1px solid ${C.line}`, background:edited?C.pinkSoft:(fromFeed?C.turqSoft:C.surface)}}>
       <div style={{display:"flex", justifyContent:"space-between", fontFamily:"'IBM Plex Mono',monospace", fontSize:10, color:C.inkSoft, marginBottom:8}}>
-        <span>GROUP {f.g}</span>{locked && <span style={{color:C.pink}}>● LOCKED</span>}
+        <span>GROUP {f.g}</span>
+        {edited
+          ? <span style={{color:C.pink}}>● EDITED</span>
+          : (fromFeed ? <span style={{color:C.turqDeep}}>● FEED</span> : null)}
       </div>
       <div style={{display:"flex", alignItems:"center", gap:8}}>
         <Side name={f.home}/>
@@ -1139,7 +1227,7 @@ function MatchCard({f, locked, onLock, onClear}){
       <div style={{display:"flex", gap:6, marginTop:10}}>
         <button className="btn-mini" disabled={!valid} style={{background:valid?C.pink:C.bg2, color:valid?"#fff":C.inkSoft}}
           onClick={()=>onLock(f.id, +ga, +gb)}>{locked?"Update":"Lock"}</button>
-        {locked && <button className="btn-mini" style={{background:C.surface, color:C.inkSoft, border:`1px solid ${C.line}`}} onClick={()=>onClear(f.id)}>Clear</button>}
+        {edited  && <button className="btn-mini" style={{background:C.surface, color:C.inkSoft, border:`1px solid ${C.line}`}} onClick={()=>onClear(f.id)}>{fromFeed?"Revert":"Clear"}</button>}
       </div>
     </div>
   );
