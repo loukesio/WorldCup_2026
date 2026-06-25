@@ -1,5 +1,5 @@
 # Mundial '26 — live forecast
-_Updated 2026-06-25T09:22:26Z · 20,000 simulations · 54 results in_
+_Updated 2026-06-25T14:33:47Z · 20,000 simulations · 54 results in_
 
 | # | Team | Grp | Champion | Final | Semi | Win group |
 |---|------|-----|----------|-------|------|-----------|
